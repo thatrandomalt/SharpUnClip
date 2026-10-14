@@ -117,8 +117,12 @@ high with twice the iterations.
    detection, m × the detected threshold with auto detection. For this engine
    no cap is best (section 6.1). Its models undershoot peaks slightly rather
    than overshoot, unlike SPADE.
-3. **Device.** PyTorch on CUDA when *GPU* is on and an NVIDIA GPU is present;
-   otherwise the CPU.
+3. **Device.** PyTorch's GPU when *GPU* is on and PyTorch sees one: CUDA
+   (NVIDIA, or AMD through a ROCm build, which PyTorch presents as CUDA), Intel
+   XPU or Apple MPS; otherwise the CPU. The engine is plain float32 PyTorch, so
+   the only device-specific code is CUDA graphs (CUDA only, off on ROCm) and
+   the memory query that sizes the SPADE stage's batches. Ops MPS lacks fall
+   back to the CPU (`PYTORCH_ENABLE_MPS_FALLBACK`).
 4. **normal+spade** (an *NMF quality* option, off by default). SharpUnClip's
    own linked SPADE (section 2.4: 512-sample frames, 16× overlap, capped at
    2.5|y|) joins the engine's two models below 4 kHz, weighted NMF 0.52,
@@ -405,12 +409,14 @@ same checks are built into `abtest.py`.
 
 `python test_sharpunclip.py` runs every engine test on every backend present
 (the SPADE tests use the Accurate SPADE settings):
-CPU, CUDA, and OpenCL once per GPU (on the development machine: an NVIDIA RTX
-4070 laptop GPU and an AMD Radeon integrated GPU).
+CPU, PyTorch's GPU (CUDA, XPU or MPS) if present, and OpenCL once per GPU (on
+the development machine: an NVIDIA RTX 4070 laptop GPU and an AMD Radeon
+integrated GPU).
 
 | Test | What it checks |
 |---|---|
-| `test_nmf_engine_auto` | NMF engine with its own analysis: samples below the ceiling are bit-exact, SNR improves by more than 3 dB, progress ends at 100%; on CPU and CUDA. |
+| `test_nmf_engine_auto` | NMF engine with its own analysis: samples below the ceiling are bit-exact, SNR improves by more than 3 dB, progress ends at 100%; on the CPU and PyTorch's GPU. |
+| `test_torch_gpu_pick` | With CUDA absent, an Intel (XPU) or Apple (MPS) GPU is picked for both engines (simulated). |
 | `test_nmf_engine_manual_detection_bounds` | NMF engine with SharpUnClip's detection: unflagged samples bit-exact, rebuilt ones keep their sign and stay within \|y\| ≤ \|x̂\| ≤ m\|y\|. |
 | `test_lsb_estimate_ignores_silent_intro` | A silent intro no longer makes 16-bit audio look like 8-bit to the NMF engine's analysis (a bug fixed in the included engine). |
 | `test_spade_progress_snapshots_are_final` | Every progress snapshot already equals the final output up to its "done" point, and reporting progress changes nothing; on every backend. |
@@ -755,10 +761,13 @@ Each idea below was measured with the same protocol and dropped.
 - **Objective scores only.** There was no formal listening test. The author's
   listening drove the investigation of the "watery" sound and the peak
   height.
-- **NMF engine GPU support is tested on NVIDIA only.** It runs on PyTorch, so
-  it uses CUDA; on AMD or Intel GPUs it runs on the CPU, unless a ROCm build of
-  PyTorch is installed (untested here; CUDA graphs are switched off there).
-  The SPADE engine runs on any GPU vendor through OpenCL.
+- **NMF engine GPU support is tested on NVIDIA only.** It runs on whatever GPU
+  PyTorch supports: AMD through a ROCm build (CUDA graphs are switched off
+  there), Intel through XPU, Apple through MPS. Those paths run the same code
+  but are untested here; only the device choice is tested, by simulation.
+  GPUs PyTorch doesn't support (e.g. Radeons older than RX 7000 on Windows)
+  run the NMF engine on the CPU. The SPADE engine runs on any GPU vendor
+  through OpenCL.
 - **Very heavy clipping.** When more than about 70% of samples are flagged,
   no sparse declipper can recover the signal; SPADE then invents loud peaks.
   Short frames also overshoot on long, decaying pure low tones.
@@ -837,7 +846,7 @@ SharpUnClip was developed with heavy AI assistance:
 
 **Software:** NumPy, SciPy (NMF engine's analysis and band split),
 soundfile/libsndfile (audio I/O), PyTorch and torchaudio (NMF engine,
-Unlimit, CUDA/CPU backend, resampling), PyOpenCL (SPADE GPU backend), Tkinter
+Unlimit, GPU/CPU backend, resampling), PyOpenCL (SPADE GPU backend), Tkinter
 (GUI). Asteroid and asteroid-filterbanks were used during development only, to
 check the De-limiter rebuild.
 

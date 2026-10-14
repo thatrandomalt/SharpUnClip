@@ -11,6 +11,7 @@ uncompress are optional later stages. See METHODS.md for the methods.
 """
 import argparse
 import copy
+import functools
 import json
 import math
 import os
@@ -23,6 +24,10 @@ try:
     import soundfile as sf
 except Exception:
     sf = None
+
+# Apple GPUs: PyTorch ops that MPS lacks run on the CPU instead of failing (read when torch loads)
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+GPU_DEVS = ("opencl", "cuda", "xpu", "mps")  # devices that mean "a GPU was asked for and found"
 
 
 def mask_min_run(mask, min_run):
@@ -38,9 +43,26 @@ def mask_min_run(mask, min_run):
     return np.cumsum(edges[:-1], dtype=np.int8) > 0
 
 
+@functools.lru_cache(None)
+def torch_gpu():
+    """PyTorch's GPU, or None: "cuda" (NVIDIA, or AMD with a ROCm build), "xpu" (Intel), "mps" (Apple)."""
+    try:
+        import torch
+    except Exception:
+        return None
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return None
+
+
 def spade_backend(gpu=False):
     """Return (array module, device). gpu: False/"cpu", True/"auto", "opencl" or "cuda".
-    auto tries OpenCL, then CUDA; otherwise the CPU (PyTorch if installed, else NumPy)."""
+    auto tries OpenCL, then PyTorch's GPU (CUDA, XPU or MPS); otherwise the CPU (PyTorch if
+    installed, else NumPy)."""
     gpu = "auto" if gpu is True else gpu or "cpu"
     if gpu in ("auto", "opencl"):
         try:
@@ -49,13 +71,10 @@ def spade_backend(gpu=False):
                 return sharpunclip_cl, "opencl"
         except Exception:
             pass
-    if gpu in ("auto", "cuda"):
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return torch, "cuda"
-        except Exception:
-            pass
+    tg = torch_gpu()
+    if tg and (gpu == "auto" or gpu == tg):
+        import torch
+        return torch, tg
     try:
         import torch
         return torch, "cpu"
@@ -70,20 +89,27 @@ def backend_name(xp, dev, opt=None):
             import torch
         except Exception:
             return "NMF engine needs PyTorch"
-        if _nmf_device(dev) == "cuda":
-            return ("NMF on ROCm: " if torch.version.hip else "NMF on CUDA: ") + torch.cuda.get_device_name()
-        return "NMF on CPU"
+        d = _nmf_device(dev)
+        return "NMF on " + (_torch_gpu_name(d) if d != "cpu" else "CPU")
     if dev == "opencl":
         return "OpenCL: " + xp.device().name.strip()
-    if dev == "cuda":
-        return "CUDA: " + xp.cuda.get_device_name()
+    if dev in ("cuda", "xpu", "mps"):
+        return _torch_gpu_name(dev)
     return "CPU"
 
 
-def _nmf_device(dev):
-    """The NMF engine runs on PyTorch: CUDA when a GPU was asked for and one is there."""
+def _torch_gpu_name(dev):
     import torch
-    return "cuda" if dev in ("opencl", "cuda") and torch.cuda.is_available() else "cpu"
+    if dev == "cuda":
+        return ("ROCm: " if torch.version.hip else "CUDA: ") + torch.cuda.get_device_name()
+    if dev == "xpu":
+        return "Intel XPU: " + torch.xpu.get_device_name()
+    return "Apple MPS"
+
+
+def _nmf_device(dev):
+    """The NMF engine runs on PyTorch: its GPU when a GPU was asked for and one is there."""
+    return (torch_gpu() or "cpu") if dev in GPU_DEVS else "cpu"
 
 
 def _nmf_analysis(opt, y, sr, an=None):
@@ -586,7 +612,7 @@ def main():
                         "2.5 is the most accurate on real songs)")
     p.add_argument("--engine", choices=("NMF", "SPADE"), type=str.upper, default=D["engine"],
                    help="declip engine: NMF (BetterDeclipper's model fusion, most accurate, needs "
-                        "PyTorch; GPU via CUDA) or SPADE (A-SPADE, GPU via OpenCL on any vendor)")
+                        "PyTorch; GPU via CUDA, ROCm, Intel XPU or Apple MPS) or SPADE (A-SPADE, GPU via OpenCL on any vendor)")
     p.add_argument("--nmf-quality", choices=NMF_QUALITIES, default=D["nmf_quality"],
                    help="NMF engine: speed/quality; normal+spade adds our short-frame SPADE as a third "
                         "model (more accurate on hard clipping, one extra SPADE pass)")
@@ -653,9 +679,10 @@ def main():
                    help="hard-clip the output at --limiter-peak (cuts restored peaks back off)")
     p.add_argument("-t", "--threads", type=int, default=os.cpu_count() or 1,
                    help="CPU threads (PyTorch CPU backend)")
-    p.add_argument("--gpu", nargs="?", const="auto", choices=("auto", "opencl", "cuda"),
-                   help="run on a GPU: auto (default) = OpenCL (any vendor) then CUDA; "
-                        "falls back to CPU")
+    p.add_argument("--gpu", nargs="?", const="auto", choices=("auto",) + GPU_DEVS,
+                   help="run on a GPU: auto (default) = OpenCL (any vendor) for the SPADE engine, then "
+                        "PyTorch's GPU (cuda: NVIDIA or AMD ROCm, xpu: Intel, mps: Apple), which the NMF "
+                        "engine always uses; falls back to CPU")
     p.add_argument("--log", metavar="FILE", help="append a run log (params, timings) to FILE")
     p.add_argument("--report", action="store_true", help="print per-channel output peak")
     pre, _ = p.parse_known_args()
@@ -681,7 +708,7 @@ def main():
     opt = settings_from_cfg(vars(a))
     opt["soft_clip"] = a.soft_clip
     xp, dev = spade_backend(a.gpu)
-    if a.gpu and dev not in ("opencl", "cuda"):
+    if a.gpu and dev not in GPU_DEVS:
         print("no GPU backend (pip install pyopencl), using CPU", file=sys.stderr)
     try:
         import torch

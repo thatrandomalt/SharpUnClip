@@ -31,11 +31,21 @@ from .social import channel_mixing
 from .common import make_bounds, threshold_scale, ChannelMix
 
 
+def _free_memory(dev):
+    """Free GPU memory in bytes: CUDA/ROCm and XPU report it; MPS and anything else are estimated."""
+    try:
+        if dev.type == "mps":
+            return torch.mps.recommended_max_memory() - torch.mps.driver_allocated_memory()
+        return getattr(torch, dev.type).mem_get_info(dev)[0]
+    except Exception:
+        return 2e9
+
+
 def _hard_single_k(c, k, rank_w=None):
     """Keep the k largest (weighted) magnitudes per row, same k for all rows."""
     mag = c.real ** 2 + c.imag ** 2
     rmag = mag if rank_w is None else mag * rank_w
-    if rmag.is_cuda:  # same value as kthvalue; topk is faster on GPUs, kthvalue on CPUs
+    if rmag.device.type != "cpu":  # same value as kthvalue; topk is faster on GPUs, kthvalue on CPUs
         thr = torch.topk(rmag, k, dim=-1, sorted=False)[0].min(-1, keepdim=True)[0]
     else:
         thr = torch.kthvalue(rmag, rmag.shape[-1] - k + 1, dim=-1, keepdim=True)[0]
@@ -174,12 +184,12 @@ def declip_spade(y, m_hi, m_lo, th_hi, th_lo, win_len=4096, hop=None, red=2, var
     unrel = (ubp > lbp).any(0).to(dtype)
     idx = torch.nonzero(unrel.unfold(0, win_len, hop).sum(-1) > 0).flatten()
     acc = torch.zeros(C, Tp, dtype=dtype, device=device)
-    on_gpu = torch.device(device).type == "cuda"
+    on_gpu = torch.device(device).type != "cpu"
     if batch_frames:
         B = batch_frames
     elif on_gpu:
         # ~0.9 MB per stereo 4096-sample frame at redundancy 2 (measured); use <= 40 % of free memory
-        free = torch.cuda.mem_get_info(torch.device(device))[0]
+        free = _free_memory(torch.device(device))
         per_frame = 0.9e6 * (win_len / 4096) * (red / 2) * (C / 2)
         B = int(min(3072, max(128, 0.4 * free / per_frame)))
     else:

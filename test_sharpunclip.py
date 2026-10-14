@@ -12,11 +12,11 @@ SPADE = dict(U.PRESETS["Accurate SPADE"])
 
 
 def _backends():
-    """Yield "cpu", "cuda" if present, and "opencl" once per OpenCL GPU (selected
-    through SHARPUNCLIP_OPENCL_DEVICE while that name is being tested)."""
+    """Yield "cpu", PyTorch's GPU if present ("cuda", "xpu" or "mps"), and "opencl" once per OpenCL GPU
+    (selected through SHARPUNCLIP_OPENCL_DEVICE while that name is being tested)."""
     yield "cpu"
-    if U.spade_backend("cuda")[1] == "cuda":
-        yield "cuda"
+    if U.torch_gpu():
+        yield U.torch_gpu()
     try:
         import pyopencl as cl
         names = [d.name for p in cl.get_platforms() for d in p.get_devices()
@@ -140,7 +140,7 @@ def test_nmf_engine_auto():
     src = _kick_stereo(sr)
     cl = np.clip(src, -0.9, 0.9)
     seen = []
-    for dev in ("cpu", "cuda") if U.spade_backend("cuda")[1] == "cuda" else ("cpu",):
+    for dev in ("cpu",) + ((U.torch_gpu(),) if U.torch_gpu() else ()):
         out = U.process(cl, sr, dict(U.DEFAULTS, max_restore=0), dev=dev,
                         progress=lambda f, d, o: seen.append((f, d)))
         keep = np.abs(cl) < 0.9 * 0.999
@@ -811,6 +811,32 @@ def test_risk_cols():
             if 2 * M[max(0, k * a - w):k * a].sum() > w:
                 ref |= (e[:-1] < k * a) & (e[1:] > k * a - w)
         assert np.array_equal(session.risk_cols(cs, w, a, e), ref), (n, w, a, t0, t1, cols)
+
+
+def test_torch_gpu_pick():
+    # Intel (XPU) and Apple (MPS) GPUs are picked like CUDA when CUDA is absent, for both engines.
+    try:
+        import torch
+    except ImportError:
+        return
+    real = torch.cuda.is_available, getattr(torch, "xpu", None), torch.backends.mps.is_available
+    try:
+        torch.cuda.is_available = lambda: False
+        torch.xpu = type("X", (), {"is_available": staticmethod(lambda: True)})
+        U.torch_gpu.cache_clear()
+        assert U.torch_gpu() == "xpu" and U.spade_backend("xpu") == (torch, "xpu")
+        assert U._nmf_device("opencl") == "xpu" and U._nmf_device("cpu") == "cpu"
+        torch.xpu.is_available = staticmethod(lambda: False)
+        torch.backends.mps.is_available = lambda: True
+        U.torch_gpu.cache_clear()
+        assert U.torch_gpu() == "mps" and U._nmf_device("mps") == "mps" and U.spade_backend("cuda")[1] == "cpu"
+    finally:
+        torch.cuda.is_available, torch.backends.mps.is_available = real[0], real[2]
+        if real[1] is None:
+            del torch.xpu
+        else:
+            torch.xpu = real[1]
+        U.torch_gpu.cache_clear()
 
 
 if __name__ == "__main__":

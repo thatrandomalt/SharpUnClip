@@ -9,8 +9,8 @@ SPDX-License-Identifier: MIT
 **Undo clipping, limiting and compression in loud music.** SharpUnClip rebuilds
 clipped peaks, reverses a limiter's gain riding and inverts a known
 compressor. It has a GUI and a command line. The default declip engine runs
-on NVIDIA GPUs (CUDA) or the CPU; the SPADE engine runs on any GPU vendor
-(OpenCL).
+on the CPU or, through PyTorch, on NVIDIA (CUDA), AMD (ROCm), Intel (XPU) and
+Apple (MPS) GPUs; the SPADE engine runs on any GPU vendor (OpenCL).
 
 ![SharpUnClip's GUI: a clipped song with its detected ceilings, the selected region previewed in green, and the Declip settings](docs/gui.png)
 
@@ -50,9 +50,9 @@ all numbers are in [METHODS.md](METHODS.md#5-testing-methodology).
 | Preset | For | Improvement vs the degraded file (song 1 / song 2) |
 |---|---|---|
 | **Accurate** (default) | clipped songs | **+8.2 / +2.0 dB** SNR (NMF engine) |
-| **Accurate SPADE** | clipped songs, on AMD/Intel GPUs or without PyTorch | +5.7 / +1.8 dB SNR |
+| **Accurate SPADE** | clipped songs, on GPUs PyTorch can't use, or without PyTorch | +5.7 / +1.8 dB SNR |
 | **Unmaster** | mastered (limited) songs | **+2.4 / +1.7 dB** SI-SDR; iZotope Ozone's Unlimiter, same songs: −0.1 / +1.3 (100%), −3.2 / +1.0 (200%) |
-| **Unmaster SPADE** | mastered songs, on AMD/Intel GPUs | +1.0 / +1.5 dB SI-SDR |
+| **Unmaster SPADE** | mastered songs, on GPUs PyTorch can't use | +1.0 / +1.5 dB SI-SDR |
 | **Uncompress** | compressed songs, settings unknown | **+0.2 to +4.0 dB** SI-SDR on all 11 compressed test renders (2:1 to 8:1) |
 | **SharpUnClip** | maximum punch | −3.3 / −0.9 dB: louder than the original, by design |
 | Uncompress, known settings | compressed songs | up to **+6.9 dB** SI-SDR (2:1 compressor); +0.6 to +1.5 dB for very fast, high-ratio compression |
@@ -95,12 +95,24 @@ for your system from <https://pytorch.org/get-started/locally/>, for example:
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
-**AMD and Intel GPUs:** the NMF engine runs on the CPU there. For GPU speed,
-pick the **Accurate SPADE** or **Unmaster SPADE** preset, which run through
-OpenCL; they are less accurate (see [Results](#results)). A ROCm build of
-PyTorch (the ROCm option on <https://pytorch.org/get-started/locally/>, for
-supported AMD GPUs) shows the GPU to PyTorch as a CUDA device, so the NMF
-engine should use it; this has not been tested here.
+**Other GPUs** need their own PyTorch build for the NMF engine (and
+Unlimit). Only CUDA has been tested here; the others run the same PyTorch code
+but are untested, so if one fails, switch *GPU* off (or drop `--gpu`) to use
+the CPU, and please report it.
+- **AMD:** a ROCm build of PyTorch, which shows the GPU to PyTorch as a CUDA
+  device. Linux: the ROCm option on <https://pytorch.org/get-started/locally/>.
+  Windows 11: AMD's PyTorch for Windows, for Radeon RX 7000/9000 and Ryzen AI
+  300 / AI Max (Python 3.12); follow
+  [AMD's guide](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html).
+  Older Radeons and most integrated ones aren't supported by ROCm.
+- **Intel Arc and Core Ultra (Windows, Linux):** with a current Intel driver,
+  `pip install torch torchaudio --index-url https://download.pytorch.org/whl/xpu`
+- **Apple silicon:** a plain `pip install torch torchaudio` includes the MPS
+  backend. Operations MPS lacks run on the CPU automatically.
+
+GPUs none of these cover can still run the **Accurate SPADE** and **Unmaster
+SPADE** presets through OpenCL; they are less accurate (see
+[Results](#results)).
 
 **GUI (Tkinter)** ships with Python on Windows and macOS. On Linux, install it
 from your package manager, e.g. `sudo apt install python3-tk`. To listen to
@@ -109,7 +121,7 @@ needs `libportaudio2` too).
 
 ### 3. GPU drivers (optional)
 
-The NMF engine needs only the NVIDIA driver plus the CUDA build of PyTorch
+The NMF engine needs only the graphics driver plus your GPU's PyTorch build
 above. The SPADE engine's GPU path uses OpenCL, so a normal graphics driver
 is enough; no CUDA or ROCm install is needed.
 - **Windows:** the standard NVIDIA, AMD or Intel driver includes OpenCL.
@@ -117,7 +129,9 @@ is enough; no CUDA or ROCm install is needed.
   `nvidia-opencl-icd` with the NVIDIA driver, Mesa's `mesa-opencl-icd`
   (Rusticl) or ROCm for AMD, `intel-opencl-icd` for Intel. Names vary by
   distribution.
-- **macOS:** Apple's OpenCL is deprecated and untested here. Use the CPU.
+- **macOS:** Apple's OpenCL is deprecated and untested here. Without
+  pyopencl, the SPADE engine uses PyTorch's MPS backend instead (also
+  untested).
 
 ### 4. Check it works
 
@@ -130,8 +144,9 @@ The test suite runs on every backend it finds. The second command prints the
 device a `--gpu` render with the default engine will use, e.g. `NMF on CUDA:
 NVIDIA GeForce RTX 4070 Laptop GPU`, or `NMF on CPU`.
 
-- **NMF engine:** CUDA when there is an NVIDIA GPU, else the CPU.
-- **SPADE engine fallback order:** OpenCL first, then PyTorch CUDA, then CPU
+- **NMF engine:** PyTorch's GPU (CUDA/ROCm, Intel XPU or Apple MPS), else
+  the CPU.
+- **SPADE engine fallback order:** OpenCL first, then PyTorch's GPU, then CPU
   (PyTorch if installed, else NumPy).
 - **Choosing a GPU:** with two GPUs it picks the stronger one. Set
   `SHARPUNCLIP_OPENCL_DEVICE` to part of a device name (e.g. `gfx` or
@@ -418,8 +433,9 @@ Flag names are for the command line.
 
 ### Declip (`--declip` / `--no-declip`)
 - **Engine** (`--engine nmf|spade`): **NMF** (default) is the most accurate
-  and the least "watery"; it needs PyTorch and uses an NVIDIA GPU if there is
-  one. **SPADE** runs on any GPU through OpenCL and gives the punchier
+  and the least "watery"; it needs PyTorch and uses PyTorch's GPU if there
+  is one (NVIDIA, AMD with ROCm, Intel, Apple). **SPADE** runs on any GPU
+  through OpenCL and gives the punchier
   SharpUnClip sound. Settings that don't apply to the chosen engine are
   greyed out in the GUI.
 - **NMF quality** (`--nmf-quality`): *fast* (about 4× faster, 1 dB less
@@ -496,8 +512,8 @@ The model is a standard digital compressor: peak detection, hard knee.
     time*, *Reset time*, *Gap length*).
   - Unlimit: changes the timescale the model sees.
   - Uncompress: your entered compressor times are converted automatically.
-- **GPU** (`--gpu`, or `--gpu opencl` / `--gpu cuda` to force one): falls back
-  to the CPU; the status line shows the device used.
+- **GPU** (`--gpu`, or `--gpu opencl` / `cuda` / `xpu` / `mps` to force
+  one): falls back to the CPU; the status line shows the device used.
 
 ### Advanced… → Declip
 These detection settings apply to the SPADE engine, and to the NMF engine
@@ -541,9 +557,9 @@ Levels and Limiter are also on the Output page of the main window.
 
 ### Quick recipes
 - **As close to the original as possible:** the **Accurate** preset.
-- **No NVIDIA GPU and a long song:** *NMF quality* fast (faster than the
-  song plays, on a laptop CPU), or **Accurate SPADE** / **Unmaster SPADE** on
-  an AMD/Intel GPU.
+- **No GPU PyTorch can use, and a long song:** *NMF quality* fast (faster
+  than the song plays, on a laptop CPU), or **Accurate SPADE** / **Unmaster
+  SPADE** through OpenCL.
 - **"No clipping found"** (the CLI says so, and the output equals the input):
   auto detection saw no ceiling, which is normal for limited masters. Use the
   **Unmaster** preset, or switch *Auto detect* off.
@@ -571,7 +587,7 @@ Levels and Limiter are also on the Output page of the main window.
 ## Testing
 
 ```
-python test_sharpunclip.py   # engine + CLI tests, on every backend found (CPU, CUDA, each OpenCL GPU)
+python test_sharpunclip.py   # engine + CLI tests, on every backend found (CPU, PyTorch's GPU, each OpenCL GPU)
 python gui.py --selfcheck    # every preset through the real GUI fields, plus the GUI's displays, previews and playback (offline, silent)
 python abtest.py --selftest  # the scoring code
 ```

@@ -6,8 +6,8 @@ import sys, os, copy, json, threading, queue, time, traceback
 from collections import OrderedDict
 import numpy as np
 import soundfile as sf
-from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, settings_from_cfg, spade_backend, backend_name,
-                         _write_log)
+from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, GPU_DEVS, torch_gpu, settings_from_cfg,
+                         spade_backend, backend_name, _write_log)
 import session
 from session import Pyramid, Song
 
@@ -516,7 +516,7 @@ class App:
         self.dot = tk.Label(aud, text="", bg=BG, fg=MUTED)
         self.dot.pack(side="right")
         self.auto = tk.BooleanVar(value=True)  # view state, not settings: preview when it takes 10 s or less
-        self.fast = tk.BooleanVar(value=self.gpu_dev not in ("opencl", "cuda"))  # NMF fast, SPADE quality <= 3
+        self.fast = tk.BooleanVar(value=self.gpu_dev not in GPU_DEVS)  # NMF fast, SPADE quality <= 3
         for text, var in (("Fast", self.fast), ("Auto", self.auto)):
             ttk.Checkbutton(aud, text=text, variable=var, takefocus=0, command=self._preview).pack(side="right",
                                                                                                 padx=(10, 0))
@@ -571,7 +571,7 @@ class App:
         self.undo_btn.pack(side="left", padx=(8, 2)); self.redo_btn.pack(side="left", padx=2)
         self.adv_btn = ttk.Button(bar, text="Advanced…", command=self.toggle_adv, takefocus=0)
         self.adv_btn.pack(side="right")
-        self.gpu = tk.BooleanVar(value=self.gpu_dev in ("opencl", "cuda"))
+        self.gpu = tk.BooleanVar(value=self.gpu_dev in GPU_DEVS)
         self.gpu.trace_add("write", lambda *a: self._changed("gpu"))
         ttk.Checkbutton(bar, text="GPU", variable=self.gpu, command=self._commit, takefocus=0).pack(side="right",
                                                                                                     padx=10)
@@ -589,9 +589,9 @@ class App:
         self.insp.pack(side="right", fill="y", padx=(10, 0)); self.insp.pack_propagate(False)
         try:
             import torch  # unlimit and the NMF engine need it
-            self.torch, self.cuda = True, torch.cuda.is_available()
+            self.torch, self.tgpu = True, torch_gpu()  # PyTorch's GPU ("cuda", "xpu", "mps") or None
         except ImportError:
-            self.torch = self.cuda = False
+            self.torch = self.tgpu = False
         self.pages, self.chips = {}, {}
         for i, (title, toggle, cols, items) in enumerate(PAGES):
             self.pages[title] = page = ttk.Frame(self.insp)
@@ -821,7 +821,7 @@ class App:
 
     def _ndev(self, cfg):
         """The torch device of the NMF engine (and its analysis) with cfg's GPU setting."""
-        return "cuda" if cfg["gpu"] and self.cuda else "cpu"
+        return self.tgpu if cfg["gpu"] and self.tgpu else "cpu"
 
     def _sh(self, cfg):
         """The shoulder search's result for cfg (its song, levels and device), or None: not searched yet."""
@@ -931,7 +931,7 @@ class App:
                 return "knee search waiting · or set a knee"
             i, n, left = self._shp
             if left is None:
-                left = self.est.seconds(("knee", self._ndev(cfg) == "cuda"), self._searched(cfg, n))
+                left = self.est.seconds(("knee", self._ndev(cfg) != "cpu"), self._searched(cfg, n))
             return f"knee search {i + 1}/{n} · ~{mmss(left)} · or set a knee"
         acc, lo = sh.get("acc"), sh.get("acc_min") or 0.0
         if sh["knee"] is not None:
@@ -1093,7 +1093,7 @@ class App:
 
     def _rlen(self):
         """Default region length, s: 4 with a GPU backend, else 2."""
-        return 4.0 if self.gpu.get() and self.gpu_dev in ("opencl", "cuda") else 2.0
+        return 4.0 if self.gpu.get() and self.gpu_dev in GPU_DEVS else 2.0
 
     def _auto_region(self):
         """Until the user sets a region: the region on the most-clipped spot (else the loudest part),
@@ -1168,7 +1168,7 @@ class App:
         return self.fast.get() and cfg["declip"] and (cfg["engine"] == "NMF" or int(cfg["speed_quality"]) > 3)
 
     def _ekind(self, cfg, fast):
-        gpu = bool(cfg["gpu"]) and (self.gpu_dev in ("opencl", "cuda") if cfg["engine"] == "SPADE" else self.cuda)
+        gpu = bool(cfg["gpu"]) and (self.gpu_dev in GPU_DEVS if cfg["engine"] == "SPADE" else bool(self.tgpu))
         return session.est_kind(cfg, fast, gpu)
 
     def _akey(self, cfg, fast):
@@ -1182,7 +1182,7 @@ class App:
         s = self.est.seconds(k, (akey[1] - akey[0]) / song.sr) if k else 0.0
         if cfg["unlimit"] and cfg["unlimit_amount"] > 0 and (self.G is None
                                                             or self.G[0] != session.keyof(cfg, session.G_KEYS)):
-            s += self.est.seconds(("unlimit", self.cuda), len(song.x) / song.sr) * (1 - self._gp)
+            s += self.est.seconds(("unlimit", bool(self.tgpu)), len(song.x) / song.sr) * (1 - self._gp)
         return s
 
     def est_text(self, r0, r1):
@@ -1254,7 +1254,7 @@ class App:
             return ""
         u = self.unl(cfg)
         if u is not None:
-            return f"gain curve: ready ({'CUDA' if self.cuda else 'CPU'} {u[4]:.1f} s)"
+            return f"gain curve: ready ({(self.tgpu or 'CPU').upper()} {u[4]:.1f} s)"
         if self._jobs.get("G") == session.keyof(cfg, session.G_KEYS):
             return f"gain curve: computing {100 * self._gp:.0f} %"
         return "gain curve: after the render" if self.rendering else "gain curve: computed when Unlimit is on"
@@ -1503,7 +1503,7 @@ class App:
                 self.est.update(ek, (akey[1] - akey[0]) / song.sr, secs)
         elif kind == "G":
             gk, G, secs, pyr, db = v
-            self.est.update(("unlimit", self.cuda), len(song.x) / song.sr, secs)
+            self.est.update(("unlimit", bool(self.tgpu)), len(song.x) / song.sr, secs)
             if self.cfg is not None and gk == session.keyof(self.cfg, session.G_KEYS):
                 self.G = gk, G, pyr, db, secs
                 self.wv.redraw(("gain",))
@@ -1511,7 +1511,7 @@ class App:
             key, _, secs, n = v
             self._shp = None
             if n:
-                self.est.update(("knee", key[-1] == "cuda"), self._searched(self.cfg, n), secs)
+                self.est.update(("knee", key[-1] != "cpu"), self._searched(self.cfg, n), secs)
             if self._det_mode() == "auto":
                 self._auto_jobs()
             self._show_stats()

@@ -87,7 +87,8 @@ def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0):
     """Per-sample gain of the model over its median for x (n, ch): the 100 % unlimit gain.
     The model runs at 44.1 kHz on crossfaded chunks; only the gain curve is resampled to sr."""
     import torchaudio.functional as AF
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = ("cuda" if torch.cuda.is_available() else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available()
+           else "mps" if torch.backends.mps.is_available() else "cpu")
     if dev not in _model:
         m = DeLimiter()
         m.load_state_dict(torch.load(WEIGHTS, map_location="cpu", weights_only=True), strict=True)

@@ -5,6 +5,6 @@
 numpy
 scipy
 soundfile
-torch  # NMF declip engine and Unlimit; install the CUDA build for NVIDIA GPUs (see README)
+torch  # NMF declip engine and Unlimit; install your GPU's build: CUDA, ROCm or XPU (see README)
 # optional: pyopencl (SPADE engine on any GPU vendor); torchaudio (Unlimit)
 # optional: sounddevice (GUI playback; Linux also needs libportaudio2)

@@ -1,2 +1,6 @@
+# SPDX-FileCopyrightText: 2026 thatrandomalt
+#
+# SPDX-License-Identifier: MIT
+
 # Auto detect text files and perform LF normalization
 * text=auto

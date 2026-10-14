@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 AG89
+# SPDX-FileCopyrightText: 2026 thatrandomalt
 # SPDX-FileCopyrightText: 2019 Pariente Manuel (Asteroid: network structure mirrored here)
 #
 # SPDX-License-Identifier: MIT
@@ -83,10 +83,9 @@ _model = {}
 
 
 @torch.no_grad()
-def gain(x, sr, amount=0.5, tick=None, seg=6.0, fade=1.0):
-    """Per-sample unlimit gain for x (n, ch): the model's gain over its median, raised to
-    `amount`. The model runs at 44.1 kHz on crossfaded chunks; only the gain curve is
-    resampled to sr."""
+def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0):
+    """Per-sample gain of the model over its median for x (n, ch): the 100 % unlimit gain.
+    The model runs at 44.1 kHz on crossfaded chunks; only the gain curve is resampled to sr."""
     import torchaudio.functional as AF
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     if dev not in _model:
@@ -116,4 +115,9 @@ def gain(x, sr, amount=0.5, tick=None, seg=6.0, fade=1.0):
     if sr != 44100:  # smooth curve: linear interpolation is enough
         g = np.interp(np.arange(len(x)) * (44100 / sr), np.arange(T), g)
     g = g[:len(x)]
-    return (g / np.median(g)) ** amount
+    return g / np.median(g)
+
+
+def gain(x, sr, amount=0.5, tick=None, seg=6.0, fade=1.0):
+    """Per-sample unlimit gain for x (n, ch): raw_gain raised to `amount`."""
+    return raw_gain(x, sr, tick, seg, fade) ** amount

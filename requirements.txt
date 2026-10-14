@@ -1,7 +1,10 @@
-# SPDX-FileCopyrightText: 2026 AG89
+# SPDX-FileCopyrightText: 2026 thatrandomalt
 #
 # SPDX-License-Identifier: MIT
 
 numpy
+scipy
 soundfile
-# optional: pyopencl (GPU, any vendor); torch + torchaudio (faster CPU, CUDA fallback, Unlimit)
+torch  # NMF declip engine and Unlimit; install the CUDA build for NVIDIA GPUs (see README)
+# optional: pyopencl (SPADE engine on any GPU vendor); torchaudio (Unlimit)
+# optional: sounddevice (GUI playback; Linux also needs libportaudio2)

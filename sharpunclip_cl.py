@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 AG89
+# SPDX-FileCopyrightText: 2026 thatrandomalt
 #
 # SPDX-License-Identifier: MIT
 

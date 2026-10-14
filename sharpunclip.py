@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: 2026 AG89
+# SPDX-FileCopyrightText: 2026 thatrandomalt
 #
 # SPDX-License-Identifier: MIT
 
@@ -10,6 +10,7 @@ Declip rebuilds clipped samples with frame-wise A-SPADE; unlimit (unlimit.py) an
 uncompress are optional later stages. See METHODS.md for the methods.
 """
 import argparse
+import copy
 import json
 import math
 import os
@@ -25,17 +26,16 @@ except Exception:
 
 
 def mask_min_run(mask, min_run):
+    """mask without its runs shorter than min_run samples."""
     if min_run <= 1:
         return mask
-    m = mask.astype(np.int8)
-    d = np.diff(np.concatenate(([0], m, [0])))
-    starts = np.flatnonzero(d == 1)
-    ends = np.flatnonzero(d == -1)
-    keep = np.zeros_like(mask)
-    for s, e in zip(starts, ends):
-        if e - s >= min_run:
-            keep[s:e] = True
-    return keep
+    d = np.diff(mask.astype(np.int8), prepend=np.int8(0), append=np.int8(0))
+    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    keep = (ends - starts) >= min_run
+    edges = np.zeros(len(mask) + 1, np.int8)
+    edges[starts[keep]] = 1  # a run never ends where another starts
+    edges[ends[keep]] = -1
+    return np.cumsum(edges[:-1], dtype=np.int8) > 0
 
 
 def spade_backend(gpu=False):
@@ -63,7 +63,16 @@ def spade_backend(gpu=False):
         return np, None
 
 
-def backend_name(xp, dev):
+def backend_name(xp, dev, opt=None):
+    """What does the heavy lifting: the SPADE backend, or the NMF engine's PyTorch device."""
+    if opt and opt.get("declip", True) and opt.get("engine") == "NMF":
+        try:
+            import torch
+        except Exception:
+            return "NMF engine needs PyTorch"
+        if _nmf_device(dev) == "cuda":
+            return ("NMF on ROCm: " if torch.version.hip else "NMF on CUDA: ") + torch.cuda.get_device_name()
+        return "NMF on CPU"
     if dev == "opencl":
         return "OpenCL: " + xp.device().name.strip()
     if dev == "cuda":
@@ -71,15 +80,129 @@ def backend_name(xp, dev):
     return "CPU"
 
 
+def _nmf_device(dev):
+    """The NMF engine runs on PyTorch: CUDA when a GPU was asked for and one is there."""
+    import torch
+    return "cuda" if dev in ("opencl", "cuda") and torch.cuda.is_available() else "cpu"
+
+
+def _nmf_analysis(opt, y, sr, an=None):
+    """(mode, analysis) for NMF auto detection. nmf_knee: 0 = as found (auto), 0.5-0.99 = soft knee at
+    this fraction of each ceiling (no shoulder search), >= 1 = ceilings only (hard)."""
+    k = float(opt.get("nmf_knee") or 0.0)
+    an = copy.deepcopy(an)
+    if k >= 1.0:
+        return "hard", an
+    if k > 0.0:
+        if an is None:
+            from betterdeclipper.auto import analyze
+            from betterdeclipper.detect import estimate_lsb
+            an = analyze(y, estimate_lsb(y), None, sr, search=False)
+        an["shoulder"] = dict(knee=max(0.5, min(k, 0.99)))  # auto_constraints fills acc_min itself
+    return "auto", an
+
+
+def _nmf_constraints(y, sr, opt, cap, device, h):
+    """The constraint set BetterDeclipper's declip() builds for these settings:
+    (m_hi, m_lo, th_hi, th_lo, gcap)."""
+    if opt["auto_detect"]:
+        from betterdeclipper.auto import auto_constraints
+        from betterdeclipper.detect import estimate_lsb
+        from betterdeclipper.engine import fast_pass
+        mode, an = _nmf_analysis(opt, y, sr, h.get("nmf_analysis"))
+        m_hi, m_lo, th_hi, th_lo, rep = auto_constraints(y, estimate_lsb(y), fast_pass(sr, device), mode=mode,
+                                                         sr=sr, analysis=an)
+        gcap = rep.pop("gcap", None)
+        if np.isfinite(cap):
+            gcap = cap if gcap is None else np.minimum(gcap, cap)
+        return m_hi, m_lo, th_hi, th_lo, gcap
+    m = (np.stack(h["masks"], 1) if h.get("masks") is not None
+         else np.stack([_clip_mask(y[:, c], sr, opt) for c in range(y.shape[1])], 1))
+    m_hi, m_lo = m & (y > 0), m & (y < 0)
+    return m_hi, m_lo, np.where(m_hi, y, np.inf), np.where(m_lo, y, -np.inf), None if np.isinf(cap) else cap
+
+
+def _declip_nmf_spade(y, sr, opt, cap, dev, xp, progress, h):
+    """NMF quality "normal+spade": BetterDeclipper's NMF and SPADE models plus our short-frame linked
+    A-SPADE (512-sample frames, 16x overlap, rebuilt |x| <= 2.5|y|), all under one constraint set and
+    fused 0.52 / 0.28 / 0.2 below 4 kHz (NMF alone above), as measured in METHODS 6.1."""
+    from betterdeclipper import engine as E
+    from betterdeclipper.methods.common import full_thresholds
+    device = _nmf_device(dev)
+    cons = _nmf_constraints(y, sr, opt, cap, device, h)
+    m_hi, m_lo, th_hi, th_lo, gcap = cons
+    clipped = m_hi | m_lo
+    if not clipped.any():
+        return y.copy(), dict(clipped_frac=0.0)
+    TH, TL = full_thresholds(th_hi, y.shape), full_thresholds(th_lo, y.shape)
+    G = None if gcap is None else np.broadcast_to(np.asarray(gcap, float), y.shape)
+    part = lambda i: progress and (lambda f: progress((i + f) / 3))
+    ests = []
+    for i, kind in enumerate(("nmf", "spade")):
+        p = part(i)
+        ests.append(E.declip(y, sr, models=[(kind, 93, {})], constraints=cons, device=device, verbose=False,
+                             progress=p and (lambda s, n, _t, p=p: p(s / n)), lam_refs=h.get("lam_refs"))[0])
+    lo, hi = y.copy(), y.copy()
+    lo[m_hi], hi[m_hi] = TH[m_hi], np.maximum(2.5 * y[m_hi], TH[m_hi])
+    hi[m_lo], lo[m_lo] = TL[m_lo], np.minimum(2.5 * y[m_lo], TL[m_lo])
+    with np.errstate(invalid="ignore"):
+        ub = None if G is None else np.where(np.isinf(G), np.inf, G * TH)
+        lb = None if G is None else np.where(np.isinf(G), -np.inf, G * TL)
+    if G is not None:
+        hi[m_hi], lo[m_lo] = np.minimum(hi[m_hi], ub[m_hi]), np.maximum(lo[m_lo], lb[m_lo])
+    s = 1.0 / np.abs(y).max()
+    p = part(2)
+    ours = aspade(y * s, lo * s, hi * s, 512, 16, xp=xp, dev=dev, progress=p and (lambda f, d, o: p(f)),
+                  group=2 if y.shape[1] == 2 else 1, unscale=s, frame0=h.get("start", 0) // 32)
+    ests.append(np.clip(ours, lo, hi))
+    out = E.fuse(y, ests, [0.52, 0.28, 0.2], [1.0, 0.0, 0.0], sr)
+    out[~clipped] = y[~clipped]  # the engine's final consistency projection
+    out = np.where(m_hi, np.maximum(out, TH), out)
+    out = np.where(m_lo, np.minimum(out, TL), out)
+    if G is not None:
+        out = np.where(m_hi, np.minimum(out, ub), out)
+        out = np.where(m_lo, np.maximum(out, lb), out)
+    return out, dict(clipped_frac=float(clipped.mean()))
+
+
+def declip_nmf(y, sr, opt, cap=np.inf, dev=None, progress=None, hints=None, xp=np):
+    """Declip with BetterDeclipper's NMF / social-sparsity / A-SPADE fusion (betterdeclipper/).
+    auto_detect uses its ceiling analysis; otherwise our clip_above/... masks become its
+    constraints (flagged samples keep their sign, |in| <= |out| <= cap*|in|).
+    progress(frac) is called between steps; raising from it cancels. hints: see process.
+    xp, dev: the SPADE backend, for nmf_quality "normal+spade". Returns (out, info)."""
+    import torch
+    from betterdeclipper.engine import declip
+    torch.set_flush_denormal(True)  # per thread: the engine sets it once, on the thread importing it
+    h = {} if hints is None else hints
+    if opt["nmf_quality"] == "normal+spade":
+        return _declip_nmf_spade(y, sr, opt, cap, dev, xp, progress, h)
+    kw = dict(preset=opt["nmf_quality"], device=_nmf_device(dev), verbose=False,
+              progress=progress and (lambda i, n, _t: progress(i / n)), lam_refs=h.get("lam_refs"))
+    if opt["auto_detect"]:
+        kw["max_gain_db"] = 20 * math.log10(cap) if np.isfinite(cap) else None
+        kw["mode"], kw["analysis"] = _nmf_analysis(opt, y, sr, h.get("nmf_analysis"))
+    else:
+        m = (np.stack(h["masks"], 1) if h.get("masks") is not None
+             else np.stack([_clip_mask(y[:, c], sr, opt) for c in range(y.shape[1])], 1))
+        m_hi, m_lo = m & (y > 0), m & (y < 0)
+        kw["constraints"] = (m_hi, m_lo, np.where(m_hi, y, np.inf), np.where(m_lo, y, -np.inf),
+                             None if np.isinf(cap) else cap)
+    return declip(y, sr, **kw)
+
+
 def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
-           batch=2048, progress=None, group=1):
+           batch=2048, progress=None, group=1, unscale=1.0, frame0=0):
     """Frame-wise A-SPADE (Kitić, Bertin & Gribonval 2015) with per-sample bounds
     lo <= x <= hi (lo == hi: reliable sample).
 
     y, lo, hi are (n, ch). Frames are solved in time-ordered batches, so memory stays
     bounded. progress(frac, done, out) is called after each batch with the output so far
     (final up to sample `done`) and with out=None in between; raising from it cancels.
-    group > 1 solves that many channels per frame with one shared set of DFT bins."""
+    group > 1 solves that many channels per frame with one shared set of DFT bins.
+    The output (and every progress snapshot) is divided by `unscale`.
+    frame0: index of y's first frame in a longer signal; batches split where that signal's
+    do, so an excerpt starting on the frame grid gives that signal's samples bit-exactly."""
     n, ch = y.shape; a = w // ov; pad = w
     L = n + 2 * pad; L += (-L) % a
     P = lambda v: np.pad(v, ((pad, L - n - pad), (0, 0)))
@@ -87,16 +210,22 @@ def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
     starts = np.arange(0, L - w + 1, a)
     g = np.hanning(w + 2)[1:-1]
     acc = np.zeros((L, ch)); ws = np.zeros(L)
+    out = y / unscale
+    fin = [0]  # samples before this are final in `out`
 
     def finish(done):
-        # clamp again: fp32 backends can land slightly outside the bounds
-        o = np.clip(acc[pad:pad + n] / np.maximum(ws[pad:pad + n, None], 1e-12), lo, hi)
-        o[done:] = y[done:]
-        return o
+        # only the newly final samples; clamp again: fp32 backends can land slightly outside the bounds
+        a0 = fin[0]
+        if done > a0:
+            out[a0:done] = np.clip(acc[pad + a0:pad + done] / np.maximum(ws[pad + a0:pad + done, None], 1e-12),
+                                   lo[a0:done], hi[a0:done]) / unscale
+            fin[0] = done
+        return out
 
-    nb = -(-len(starts) // batch)
+    cuts = np.r_[0, np.arange((-frame0) % batch or batch, len(starts), batch), len(starts)]
+    nb = len(cuts) - 1
     for bi in range(nb):
-        s = starts[bi * batch:(bi + 1) * batch]; B = len(s)
+        s = starts[cuts[bi]:cuts[bi + 1]]; B = len(s)
         seg = s[:, None] - s[0] + np.arange(w); m = s[-1] - s[0] + w
 
         def rows(v):
@@ -113,7 +242,7 @@ def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
         for c in range(ch):
             acc[s[0]:s[0] + m, c] += np.bincount(seg.ravel(), weights=Yg[c].ravel(), minlength=m)
         if progress:
-            nxt = (bi + 1) * batch  # samples before the next frame start are final
+            nxt = cuts[bi + 1]  # samples before the next frame start are final
             done = n if nxt >= len(starts) else min(n, max(0, starts[nxt] - pad))
             progress((bi + 1) / nb, done, finish(done))
     return finish(n)
@@ -156,8 +285,11 @@ def _aspade_frames(Y, LO, HI, N, eps, maxit, xp, dev, tick=None, group=1):
     return x.cpu().numpy() if hasattr(x, "cpu") else x
 
 
+NMF_QUALITIES = ("fast", "normal", "high", "best", "normal+spade")
+
 # Defaults are the Accurate preset. The keys are also the GUI field names, the CLI's
-# argparse dests and the keys of saved preset files.
+# argparse dests and the keys of saved preset files. (One expert option is CLI-only and not
+# listed here: opt["soft_clip"] = "cubic", see process().)
 DEFAULTS = {
     "clip_above": 99.9,       # % of peak
     "not_clip_below": 99.8,   # % of peak
@@ -180,7 +312,11 @@ DEFAULTS = {
     "trans_time": 0.5,        # s
     "speed_quality": 5,
     "lookahead": 0,
-    "max_restore": 2.5,       # x clipped level, 0 = no cap
+    "max_restore": 0.0,       # x clipped level, 0 = no cap (SPADE: 2.5 is the most accurate)
+    "engine": "NMF",          # declip engine: NMF (BetterDeclipper's model fusion) or SPADE
+    "nmf_quality": "normal",  # NMF engine: fast, normal, high, best or normal+spade (adds our SPADE model)
+    "auto_detect": True,      # NMF engine: its own ceiling analysis instead of clip_above etc.
+    "nmf_knee": 0.0,          # NMF auto: 0 = as found, 0.5-0.99 = soft knee (x ceiling), 1 = ceilings only
     "unlimit": False,
     "unlimit_amount": 50.0,   # %
     "uncompress": False,
@@ -195,8 +331,13 @@ DEFAULTS = {
 }
 PRESETS = {
     "Accurate": dict(DEFAULTS),
-    "Unmaster": dict(DEFAULTS, clip_above=93.0, not_clip_below=92.9, unlimit=True),
-    "SharpUnClip": dict(DEFAULTS, clip_above=78.0, not_clip_below=77.0, speed_quality=3,
+    "Accurate SPADE": dict(DEFAULTS, engine="SPADE", max_restore=2.5),
+    "Unmaster": dict(DEFAULTS, auto_detect=False, clip_above=75.0, not_clip_below=74.9, unlimit=True,
+                     unlimit_amount=15.0),
+    "Unmaster SPADE": dict(DEFAULTS, engine="SPADE", clip_above=93.0, not_clip_below=92.9, max_restore=2.5,
+                           unlimit=True),
+    "Uncompress": dict(DEFAULTS, declip=False, uncompress=True),
+    "SharpUnClip": dict(DEFAULTS, engine="SPADE", clip_above=78.0, not_clip_below=77.0, speed_quality=3,
                         lookahead=1, max_restore=0.0),
 }
 
@@ -213,6 +354,13 @@ def settings_from_cfg(cfg):
 
 def _db2lin(db):
     return 10.0 ** (float(db) / 20.0)
+
+
+def cubic_inverse(y, c):
+    """Undo the cubic soft clipper y = c*(w - w^3/6.75), w = u/c, flat at +-c from |w| = 1.5 (PeakEater's
+    "cubic"). Unit slope at 0, so c is its only parameter; |y| >= c comes back as a flat ceiling at 1.5c."""
+    s = np.clip(y / c, -1.0, 1.0)
+    return 3.0 * c * np.cos(np.arccos(-s) / 3.0 - 2.0 * np.pi / 3.0)
 
 
 def uncompress_gain(y, sr, threshold, ratio, attack_ms, release_ms, makeup=0.0, link=False, tick=None):
@@ -247,82 +395,78 @@ def uncompress_gain(y, sr, threshold, ratio, attack_ms, release_ms, makeup=0.0, 
     return -(gains + makeup)
 
 
-def _per_clip_peaks(a, peaks, n, sr, trans_amp_db, trans_time, ignore, reset_amp):
-    """Fill `peaks` with one peak per section, splitting at gaps quieter than trans_amp
-    for at least trans_time. Gap samples take the next section's peak."""
-    trans_amp = _db2lin(trans_amp_db)
-    trans_win = max(1, int(round(float(sr) * max(0.0, float(trans_time)))))
-    low = (a < trans_amp).astype(np.int8)
-    d = np.diff(np.concatenate(([0], low, [0])))
-    tstarts = np.flatnonzero(d == 1)
-    tends = np.flatnonzero(d == -1)
-    trans = np.zeros(n, dtype=bool)
-    longr = (tends - tstarts) >= trans_win
-    for s, e in zip(tstarts[longr], tends[longr]):
-        trans[s:e] = True
-    ntrans = (~trans).astype(np.int8)
-    d2 = np.diff(np.concatenate(([0], ntrans, [0])))
-    cstarts = np.flatnonzero(d2 == 1)
-    cends = np.flatnonzero(d2 == -1)
-    if cstarts.size == 0:
-        peaks[:] = reset_amp
-        return
-    clip_of = np.full(n, -1, dtype=np.int64)
-    seg_peak = np.empty(cstarts.size, dtype=np.float64)
-    for k in range(cstarts.size):
-        s, e = int(cstarts[k]), int(cends[k])
-        seg = a[s:e]
-        pk = float(np.quantile(seg, 1.0 - ignore)) if seg.size > 1 else float(seg[0])
-        seg_peak[k] = max(pk, reset_amp)
-        clip_of[s:e] = k
-    valid_idx = np.flatnonzero(clip_of >= 0)
-    valid_ids = clip_of[valid_idx]
-    pos = np.searchsorted(valid_idx, np.arange(n), side="left")
-    # a trailing gap takes the last section's peak
-    peaks[:] = seg_peak[valid_ids[np.minimum(pos, valid_ids.size - 1)]]
-
-
-def _clip_mask(y0, sr, opt):
-    """Which samples of one channel are clipped."""
-    n = len(y0)
-    a = np.abs(y0)
-    peaks = np.empty(n, dtype=np.float64)
-
-    win = max(1, int(round(float(sr) * max(0.001, float(opt["peak_time"])))))
-    reset_win = max(1, int(round(float(sr) * max(0.001, float(opt["reset_time"])))))
+def peak_steps(a, sr, opt):
+    """Measured peak of a = |x| as a staircase: peaks(t) = values[k] for starts[k] <= t < starts[k+1].
+    diff_clips: one peak per section, split at gaps quieter than trans_amp for at least
+    trans_time; gap samples take the next section's peak, a trailing gap the last one's.
+    Otherwise one peak per peak_time block."""
+    n = len(a)
     reset_amp = _db2lin(opt["reset_amp"])
-    floor = _db2lin(opt["not_clip_amp"])
-    low = float(opt["not_clip_below"]) / 100.0
     ignore = min(0.999, max(0.0, float(opt["peak_ignore"])))
 
+    def peak(seg):
+        return float(np.quantile(seg, 1.0 - ignore)) if seg.size > 1 else float(seg[0])
     if opt["diff_clips"]:
-        _per_clip_peaks(a, peaks, n, sr, float(opt["trans_amp"]), float(opt["trans_time"]),
-                        ignore, reset_amp)
-    else:
-        for s in range(0, n, win):
-            e = min(n, s + win)
-            aa = a[s:e]
-            pk = float(np.quantile(aa, 1.0 - ignore)) if aa.size > 1 else float(aa[0])
-            if aa.max() < reset_amp and (e - s) >= reset_win:
-                pk = reset_amp
-            pk = max(pk, reset_amp)
-            peaks[s:e] = pk
+        trans_win = max(1, int(round(float(sr) * max(0.0, float(opt["trans_time"])))))
+        sections = ~mask_min_run(a < _db2lin(opt["trans_amp"]), trans_win)
+        d = np.diff(np.concatenate(([0], sections.astype(np.int8), [0])))
+        cstarts, cends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+        if cstarts.size == 0:
+            return np.array([0]), np.array([reset_amp])
+        values = [max(peak(a[s:e]), reset_amp) for s, e in zip(cstarts, cends)]
+        return np.r_[0, cends[:-1]], np.array(values)
+    win = max(1, int(round(float(sr) * max(0.001, float(opt["peak_time"])))))
+    reset_win = max(1, int(round(float(sr) * max(0.001, float(opt["reset_time"])))))
+    starts = np.arange(0, n, win)
+    values = np.empty(len(starts))
+    for k, s in enumerate(starts):
+        aa = a[s:s + win]
+        pk = peak(aa)
+        if aa.max() < reset_amp and aa.size >= reset_win:
+            pk = reset_amp
+        values[k] = max(pk, reset_amp)
+    return starts, values
 
+
+def expand_steps(starts, values, n):
+    return np.repeat(values, np.diff(np.r_[starts, n]))
+
+
+def flag_mask(a, peaks, opt):
+    """Which samples of a = |x| are clipped, given the measured peaks(t)."""
     # dynamic: clipped above clip_above; otherwise above not_clip_below
     high = float(opt["clip_above"]) / 100.0
+    low = float(opt["not_clip_below"]) / 100.0
     mask = a >= peaks * (high if opt["dynamic"] else min(low, high))
     if opt["soft"]:
         mask |= a >= (1.0 - 0.08) * peaks
-    mask &= a >= floor
-
+    mask &= a >= _db2lin(opt["not_clip_amp"])
     if opt["remove_glitch"]:
         mask = mask_min_run(mask, 2)
     return mask
 
 
-def process(x, sr, opt=None, xp=np, dev=None, progress=None):
+def _clip_mask(y0, sr, opt):
+    """Which samples of one channel are clipped."""
+    a = np.abs(y0)
+    return flag_mask(a, expand_steps(*peak_steps(a, sr, opt), len(a)), opt)
+
+
+def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=None):
     """Declip, then unlimit, then uncompress x ((n,) or (n, ch)), as enabled in `opt`
-    (see DEFAULTS). progress: see aspade."""
+    (see DEFAULTS). progress: see aspade. A dict passed as `info` receives "flagged", the
+    fraction of samples declip treated as clipped, and "limited", the fraction the limiter cut.
+    hints: optional dict of precomputed file-global inputs (GUI previews):
+      masks        list of per-channel bool arrays: manual-detection flags for this x
+      norm         SPADE level normalisation (1 / max|y0| of the whole file)
+      start        index of x[0] in the whole file (SPADE: frame batches line up with the render's)
+      nmf_analysis betterdeclipper analysis dict (refs, shoulder, source); NMF auto detection
+      lam_refs     {win_ms: float}: file-global PnP lambda reference
+      unlimit_g    (n,): 100 % unlimit gain, g / median(g) over the whole file
+      unlimit_ref  (n, ch): the declip stage's input for this x (stage B of a split render; default y0)
+      uc_gain      (n, ch): uncompress gain in dB for this stage input; present with value None,
+                   it receives the computed gain
+      soft_clip_c  opt["soft_clip"] == "cubic": the ceiling, max|y0| of the whole file"""
     opt = dict(DEFAULTS, **(opt or {}))
     pr = float(opt["process_rate"] or 0)
     if pr > 0 and abs(pr - sr) > 0.5:
@@ -331,10 +475,15 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None):
         k = sr / pr
         opt = dict(opt, process_rate=0.0, uc_attack=float(opt["uc_attack"]) * k,
                    uc_release=float(opt["uc_release"]) * k)
-        return process(x, pr, opt, xp, dev, progress)
+        return process(x, pr, opt, xp, dev, progress, info, hints)
+    h = {} if hints is None else hints
     x = np.asarray(x, dtype=np.float64)
     mono = x.ndim == 1
     y0 = (x[:, None] if mono else x) * _db2lin(opt["input_gain"])
+    if y0.size and opt["declip"] and opt.get("soft_clip", "off") == "cubic":
+        c = h.get("soft_clip_c") or float(np.abs(y0).max())
+        if c > 0:
+            y0 = cubic_inverse(y0, c)  # every later stage sees the un-soft-clipped signal
     out = y0.copy()
     ul = float(opt["unlimit_amount"]) / 100.0 if opt["unlimit"] else 0.0
     uc = float(opt["uc_amount"]) / 100.0 if opt["uncompress"] else 0.0
@@ -353,31 +502,54 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None):
         # flagged samples keep their sign: |in| <= |out| <= cap*|in|
         cap = float(opt["max_restore"])
         cap = max(cap, 1.0) if cap > 0 else np.inf
-        lo, hi = y0.copy(), y0.copy()
-        for c in range(y0.shape[1]):
-            m = _clip_mask(y0[:, c], sr, opt)
-            neg, pos = m & (y0[:, c] < 0), m & (y0[:, c] > 0)
-            lo[neg, c] = cap * y0[neg, c]
-            hi[pos, c] = cap * y0[pos, c]
-        if np.any(lo != hi):
-            quality = max(0, min(6, int(opt["speed_quality"])))
-            w = 512 << max(0, min(2, int(opt["lookahead"])))
-            ov = (2, 4, 4, 8, 8, 16, 16)[quality]
-            s = 1.0 / np.abs(y0).max()  # eps is absolute, so normalise the level
-            at = share("declip")
-            prog = progress and (lambda f, d, o: progress(at(f), d, None if o is None else o / s))
-            grp = 2 if opt["linked_stereo"] and y0.shape[1] == 2 else 1
-            out = aspade(y0 * s, lo * s, hi * s, w, ov, xp=xp, dev=dev, progress=prog, group=grp) / s
-            out = np.clip(out, lo, hi)  # keeps untouched samples bit-exact
+        at = share("declip")
+        if opt["engine"] == "NMF":
+            out, nmf_info = declip_nmf(y0, sr, opt, cap, dev, progress and (lambda f: progress(at(f), None, None)),
+                                       h, xp)
+            if info is not None:
+                info["flagged"] = nmf_info["clipped_frac"]
+            if progress:
+                progress(at(1.0), len(out), out)
+        else:
+            lo, hi = y0.copy(), y0.copy()
+            for c in range(y0.shape[1]):
+                m = h["masks"][c] if h.get("masks") is not None else _clip_mask(y0[:, c], sr, opt)
+                neg, pos = m & (y0[:, c] < 0), m & (y0[:, c] > 0)
+                lo[neg, c] = cap * y0[neg, c]
+                hi[pos, c] = cap * y0[pos, c]
+            if info is not None:
+                info["flagged"] = float(np.mean(lo != hi))
+            if np.any(lo != hi):
+                quality = max(0, min(6, int(opt["speed_quality"])))
+                w = 512 << max(0, min(2, int(opt["lookahead"])))
+                ov = (2, 4, 4, 8, 8, 16, 16)[quality]
+                s = h.get("norm") or 1.0 / np.abs(y0).max()  # eps is absolute, so normalise the level
+                prog = progress and (lambda f, d, o: progress(at(f), d, o))
+                grp = 2 if opt["linked_stereo"] and y0.shape[1] == 2 else 1
+                out = aspade(y0 * s, lo * s, hi * s, w, ov, xp=xp, dev=dev, progress=prog, group=grp, unscale=s,
+                             frame0=h.get("start", 0) // (w // ov))
+                out = np.clip(out, lo, hi)  # keeps untouched samples bit-exact
     if y0.size and ul > 0:
-        import unlimit  # needs PyTorch
         at = share("unlimit")
-        out = out * unlimit.gain(y0, sr, ul, progress and (lambda f: progress(at(f), None, None)))[:, None]
+        ref = h.get("unlimit_ref", y0)
+        g = h.get("unlimit_g")
+        if g is None:
+            import unlimit  # needs PyTorch
+            g = unlimit.gain(ref, sr, ul, progress and (lambda f: progress(at(f), None, None)))
+        else:
+            g = g ** ul
+        # gain the input and add declip's correction unscaled (multiplying the declipped signal applied
+        # the gain twice to the rebuilt peaks); exactly ref * g when declip is off
+        out = ref * g[:, None] + (out - ref)
     if y0.size and uc > 0:
         at = share("uncompress")
-        g = uncompress_gain(out, sr, opt["uc_threshold"], opt["uc_ratio"], opt["uc_attack"],
-                            opt["uc_release"], float(opt["uc_makeup"]), bool(opt["uc_link"]),
-                            progress and (lambda f: progress(at(f), None, None)))
+        g = h.get("uc_gain")
+        if g is None:
+            g = uncompress_gain(out, sr, opt["uc_threshold"], opt["uc_ratio"], opt["uc_attack"],
+                                opt["uc_release"], float(opt["uc_makeup"]), bool(opt["uc_link"]),
+                                progress and (lambda f: progress(at(f), None, None)))
+            if "uc_gain" in h:
+                h["uc_gain"] = g
         out = out * 10 ** (g * uc / 20)
     if progress and (ul > 0 or uc > 0):
         progress(1.0, len(out), out)
@@ -385,6 +557,8 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None):
     if opt["limiter"]:
         lim = _db2lin(opt["limiter_peak"])
         if lim > 0:
+            if info is not None:
+                info["limited"] = float(np.mean(np.abs(out) > lim))
             out = np.clip(out, -lim, lim)
     return out[:, 0] if mono else out
 
@@ -410,9 +584,24 @@ def main():
     p.add_argument("--max-restore", type=float, default=D["max_restore"],
                    help="cap rebuilt peaks at this many times the clipped level (0 = no cap; "
                         "2.5 is the most accurate on real songs)")
+    p.add_argument("--engine", choices=("NMF", "SPADE"), type=str.upper, default=D["engine"],
+                   help="declip engine: NMF (BetterDeclipper's model fusion, most accurate, needs "
+                        "PyTorch; GPU via CUDA) or SPADE (A-SPADE, GPU via OpenCL on any vendor)")
+    p.add_argument("--nmf-quality", choices=NMF_QUALITIES, default=D["nmf_quality"],
+                   help="NMF engine: speed/quality; normal+spade adds our short-frame SPADE as a third "
+                        "model (more accurate on hard clipping, one extra SPADE pass)")
+    p.add_argument("--soft-clip", choices=("off", "cubic"), default="off",
+                   help="cubic = undo a cubic soft clipper (e.g. PeakEater's cubic curve) before declipping; "
+                        "only for audio known to be soft clipped: on hard clips it is much worse")
+    p.add_argument("--auto-detect", action=argparse.BooleanOptionalAction, default=D["auto_detect"],
+                   help="NMF engine: find the clip/limiter ceilings automatically (off: use "
+                        "--clip-above and the other detection flags)")
+    p.add_argument("--nmf-knee", type=float, default=D["nmf_knee"],
+                   help="NMF auto detection: soft knee as a fraction of each ceiling (0 = as found, "
+                        "0.5-0.99 = rebuild from this level, 1 = ceilings only)")
     p.add_argument("--unlimit", dest="unlimit_cli", type=float, nargs="?", const=-1.0, metavar="AMOUNT",
-                   help="undo a limiter after declipping, at AMOUNT %% (default 50, the most "
-                        "accurate on real masters; 0 = off; needs PyTorch)")
+                   help="undo a limiter after declipping, at AMOUNT %% (default 50, the most accurate "
+                        "when unlimit runs alone; the Unmaster preset uses 15; 0 = off; needs PyTorch)")
     p.add_argument("--uncompress", dest="uncompress_cli", type=float, nargs="?", const=-1.0, metavar="AMOUNT",
                    help="undo a compressor last, at AMOUNT %% (default 50; 100 is exact only if "
                         "the model fits); give its settings with the --comp-* flags")
@@ -436,10 +625,10 @@ def main():
     p.add_argument("--peak-ignore", type=float, default=D["peak_ignore"],
                    help="fraction of loudest samples ignored when measuring the peak")
     p.add_argument("--peak-time", type=float, default=D["peak_time"],
-                   help="peak measurement window in seconds")
+                   help="peak measurement window in seconds (only with --no-diff-clips)")
     p.add_argument("--reset-amp", type=float, default=D["reset_amp"])
     p.add_argument("--reset-time", type=float, default=D["reset_time"],
-                   help="reset duration in seconds")
+                   help="no effect, kept for older presets")
     p.add_argument("--trans-amp", type=float, default=D["trans_amp"],
                    help="dBFS; amplitude below this held for --trans-time marks a transition")
     p.add_argument("--trans-time", type=float, default=D["trans_time"],
@@ -489,24 +678,39 @@ def main():
         raise SystemExit("soundfile not installed (pip install soundfile)")
 
     threads = max(1, a.threads)
+    opt = settings_from_cfg(vars(a))
+    opt["soft_clip"] = a.soft_clip
     xp, dev = spade_backend(a.gpu)
     if a.gpu and dev not in ("opencl", "cuda"):
         print("no GPU backend (pip install pyopencl), using CPU", file=sys.stderr)
-    if dev == "cpu":
-        xp.set_num_threads(threads)
-    print("using " + backend_name(xp, dev), file=sys.stderr)
+    try:
+        import torch
+        torch.set_num_threads(threads)
+    except Exception:
+        pass
+    print("using " + backend_name(xp, dev, opt), file=sys.stderr)
 
     t0 = time.time()
     log_lines = [f"SharpUnClip {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                 f"input={a.input} backend={backend_name(xp, dev)} threads={threads}"]
+                 f"input={a.input} backend={backend_name(xp, dev, opt)} threads={threads}"]
     x, sr = sf.read(a.input, always_2d=True)  # (n, ch)
     log_lines.append(f"sr={sr} samples={x.shape[0]} channels={x.shape[1]}")
-    opt = settings_from_cfg(vars(a))
     log_lines.append(" ".join(f"{k}={v}" for k, v in opt.items()))
     out_path = a.out or os.path.splitext(a.input)[0] + "_declipped.wav"
-    out = process(x, sr, opt, xp=xp, dev=dev,
-                  progress=lambda f, *_: print(f"\r{f:5.0%}", end="", file=sys.stderr, flush=True))
+    shown, info = [-1], {}
+
+    def progress(f, *_):
+        if int(f * 100) != shown[0]:
+            shown[0] = int(f * 100)
+            print(f"\r{f:5.0%}", end="", file=sys.stderr, flush=True)
+    out = process(x, sr, opt, xp=xp, dev=dev, progress=progress, info=info)
     print(file=sys.stderr)
+    if opt["declip"] and info.get("flagged") == 0:
+        print("declip: no clipping found, so it left the audio unchanged"
+              + (" (on a limited master try --no-auto-detect, or --preset Unmaster)"
+                 if opt["engine"] == "NMF" and opt["auto_detect"] else ""), file=sys.stderr)
+    if "flagged" in info:
+        log_lines.append(f"declip flagged={info['flagged']:.4%}")
     if a.report:
         for c in range(out.shape[1]):
             print(f"ch{c}: output peak={np.abs(out[:, c]).max():.3f}")

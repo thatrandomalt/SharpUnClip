@@ -12,6 +12,8 @@ compressor. It has a GUI and a command line. The default declip engine runs
 on NVIDIA GPUs (CUDA) or the CPU; the SPADE engine runs on any GPU vendor
 (OpenCL).
 
+![SharpUnClip's GUI: a clipped song with its detected ceilings, the selected region previewed in green, and the Declip settings](docs/gui.png)
+
 > **AI-assisted project.** The code, experiments and documentation were written
 > by AI coding agents (mainly Claude by Anthropic, in Claude Code) under the
 > direction of the project author, who set the goals, rendered every test file
@@ -600,6 +602,7 @@ unreleased music, and too large for GitHub.
 | `abtest.py` | Scoring against a known original |
 | `test_sharpunclip.py` | Automated tests |
 | `weights/` | Pretrained De-limiter weights |
+| `docs/` | README screenshot |
 | `LICENSE`, `LICENSES/` | MIT license (SPDX/REUSE layout) |
 | `THIRD_PARTY_NOTICES.md` | Third-party material, its full license texts, papers, training data |
 | `METHODS.md` | Methods, modifications to the papers, testing, results, limitations |

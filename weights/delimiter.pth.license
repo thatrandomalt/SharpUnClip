@@ -1,0 +1,4 @@
+SPDX-FileCopyrightText: 2023 jeonchangbin49
+SPDX-License-Identifier: MIT
+SPDX-FileComment: Pretrained De-limiter weights (Jeon & Lee, WASPAA 2023),
+    unchanged from https://github.com/jeonchangbin49/De-limiter (weight/all.pth, commit e15f80b).

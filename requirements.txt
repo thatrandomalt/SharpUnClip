@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 AG89
+#
+# SPDX-License-Identifier: MIT
+
+numpy
+soundfile
+# optional: pyopencl (GPU, any vendor); torch + torchaudio (faster CPU, CUDA fallback, Unlimit)

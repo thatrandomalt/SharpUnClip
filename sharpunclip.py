@@ -20,6 +20,10 @@ import sys
 import time
 import traceback
 
+if sys.version_info < (3, 10):  # before anything newer fails with a confusing error
+    sys.exit(f"SharpUnClip needs Python 3.10 or newer (3.12 recommended); this is {sys.version.split()[0]}. "
+             "Install 3.12 from python.org (macOS's built-in python3 is 3.9) and make the .venv with it.")
+
 import numpy as np
 
 try:

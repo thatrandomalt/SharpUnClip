@@ -68,13 +68,18 @@ run (a few seconds); pyopencl caches it, so later runs start immediately.
 
 ### 1. Get the code and make a virtual environment
 
-Needs Python 3.9 or newer.
+Use **Python 3.12** (3.10 is the minimum). AMD's PyTorch builds for Windows
+are 3.12 only, and on some AMD setups tkinter would not import on newer
+versions. Get it from <https://www.python.org/downloads/>: on macOS that build
+includes Tk, and the `python3` macOS ships is 3.9, which is too old.
 
 ```
 git clone <this repository's URL>
 cd SharpUnClip
-python -m venv .venv
+python3.12 -m venv .venv
 ```
+
+(On Windows: `py -3.12 -m venv .venv`.)
 
 Activate the environment:
 - **Windows:** `.venv\Scripts\activate`

@@ -202,12 +202,12 @@ class Song:
             self._peak = max(self.x.max(), -self.x.min()) if self.x.size else 0.0
         return self._peak
 
-    def unlimit_raw(self, cfg, tick=None):
-        """The 100 % unlimit gain of the whole song (over its median, as process() computes it),
-        float32 (n,). Needs PyTorch."""
+    def unlimit_raw(self, cfg, tick=None, dev="cpu"):
+        """The 100 % unlimit gain of the whole song (over its median, as process() computes it on torch
+        device dev), float32 (n,). Needs PyTorch."""
         import unlimit
         y0 = self.x * U._db2lin(cfg["input_gain"])
-        return unlimit.raw_gain(y0, rate_p(cfg, self.sr), tick).astype(np.float32)
+        return unlimit.raw_gain(y0, rate_p(cfg, self.sr), tick, dev=dev).astype(np.float32)
 
     def y0(self, cfg, c):
         """|y0| of channel c: the level detection sees."""

@@ -11,6 +11,9 @@ modules the engine needs (no CLI). Changes: a progress tick inside the SPADE sta
 so a silent intro no longer looks like 8-bit audio (detect.py); CUDA graphs are off on ROCm
 builds of PyTorch, where graph capture can hang (methods/pnp.py); the SPADE stage sizes its
 batches and picks top-k on any PyTorch GPU (CUDA, XPU, MPS), not only CUDA (methods/spade.py);
+CUDA graphs are captured on the solve's own GPU, which need not be the current one (methods/pnp.py);
+declip(device=[...]) shares the PnP/NMF chunks between several devices, without CUDA graphs
+(engine.py, methods/pnp.py);
 fast_pass() and lam_refs_for() (which also accepts a non-integer sample rate) split out of declip(), and
 declip(lam_refs=) to reuse a file-global lambda reference (engine.py, for SharpUnClip GUI
 previews).

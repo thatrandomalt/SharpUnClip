@@ -6,9 +6,11 @@
 Needs pyopencl.
 
 Each work-group runs whole A-SPADE iterations for one frame (of every linked channel)
-in local memory. SHARPUNCLIP_OPENCL_DEVICE picks a GPU by part of its name.
+in local memory. SHARPUNCLIP_OPENCL_DEVICE (sharpunclip.set_gpu, --gpu-name) picks a GPU by part of
+its name.
 """
 import os
+import threading
 import warnings
 import numpy as np
 import pyopencl as cl
@@ -125,26 +127,48 @@ void aspade_iters(__global float2 *Z, __global float2 *U, __global float2 *ZB,
 }
 """
 
-_cache = {}
+_cache, _setup_lock = {}, threading.Lock()
+
+
+def gpus():
+    """Every OpenCL GPU."""
+    out = []
+    for p in cl.get_platforms():
+        try:
+            out += p.get_devices(cl.device_type.GPU)
+        except cl.Error:
+            pass
+    return out
+
+
+def label(d):
+    """A GPU's name as people know it: AMD's board name ("AMD Radeon(TM) 610M", not "gfx1036")."""
+    try:
+        return d.board_name_amd.strip() or d.name.strip()
+    except Exception:  # not an AMD device
+        return d.name.strip()
 
 
 def device(name=None):
-    """The OpenCL GPU with the most compute units (optionally matching `name`), or None."""
+    """The OpenCL GPU with the most compute units, or None; with `name` (default
+    SHARPUNCLIP_OPENCL_DEVICE), of those whose name or label contains it, and "NAME #2" the second
+    such GPU in the drivers' order (for identical cards)."""
     name = name if name is not None else os.environ.get("SHARPUNCLIP_OPENCL_DEVICE")
-    gpus = []
-    for p in cl.get_platforms():
-        try:
-            gpus += p.get_devices(cl.device_type.GPU)
-        except cl.Error:
-            pass
+    found = gpus()
     if name:
-        gpus = [d for d in gpus if name.lower() in d.name.lower()]
-    return max(gpus, key=lambda d: d.max_compute_units, default=None)
+        want, _, nth = name.lower().partition("#")
+        found = [d for d in found if want.strip() in f"{d.name} {label(d)}".lower()]
+        if nth.strip().isdigit():
+            k = int(nth) - 1
+            return found[k] if 0 <= k < len(found) else None
+    return max(found, key=lambda d: d.max_compute_units, default=None)
 
 
 def _setup(dev, w, N, C):
     key = (dev.int_ptr, w, N, C)
-    if key not in _cache:
+    with _setup_lock:
+        if key in _cache:
+            return _cache[key]
         ls = min(256, dev.max_work_group_size)
         if 8 * N + 4 * (N // 2 + 1) + 4 * ls + 128 > dev.local_mem_size:
             raise RuntimeError(f"{dev.name}: not enough local memory for {N}-point frames "
@@ -161,8 +185,8 @@ def _setup(dev, w, N, C):
         tw = np.exp(-2j * np.pi * np.arange(N // 2) / N).astype(np.complex64)
         mf = cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR
         _cache[key] = (ctx, cl.CommandQueue(ctx), kern, ls,
-                       cl.Buffer(ctx, mf, hostbuf=tw), cl.Buffer(ctx, mf, hostbuf=rev))
-    return _cache[key]
+                       cl.Buffer(ctx, mf, hostbuf=tw), cl.Buffer(ctx, mf, hostbuf=rev), threading.Lock())
+        return _cache[key]
 
 
 def aspade_frames(Y, LO, HI, N, eps, maxit, tick=None, group=1, dev=None, chunk=25):
@@ -171,23 +195,24 @@ def aspade_frames(Y, LO, HI, N, eps, maxit, tick=None, group=1, dev=None, chunk=
     rows, w = Y.shape
     assert N & (N - 1) == 0, "N must be a power of two"
     assert rows % group == 0
-    ctx, q, kern, ls, tw, rev = _setup(dev or device(), w, N, group)
+    ctx, q, kern, ls, tw, rev, lock = _setup(dev or device(), w, N, group)
     nb, groups = N // 2 + 1, rows // group
     mf = cl.mem_flags.READ_WRITE | cl.mem_flags.COPY_HOST_PTR
     put = lambda a: cl.Buffer(ctx, mf, hostbuf=np.ascontiguousarray(a))
-    Z = put((np.fft.rfft(Y, N) * N ** -0.5).astype(np.complex64))
-    U, ZB = put(np.zeros((rows, nb), np.complex64)), put(np.zeros((rows, nb), np.complex64))
-    X, LOb, HIb = put(Y.astype(np.float32)), put(LO.astype(np.float32)), put(HI.astype(np.float32))
-    act = np.ones(groups, np.int32)
-    A = put(act)
-    for start in range(0, maxit, chunk):
-        if tick:
-            tick(start / maxit)
-        kern(q, (groups * ls,), (ls,), Z, U, ZB, X, LOb, HIb, A, tw, rev,
-             np.int32(start + 1), np.int32(min(chunk, maxit - start)), np.float32(eps * eps))
-        cl.enqueue_copy(q, act, A)
-        if not act.any():
-            break
-    out = np.empty((rows, w), np.float32)
-    cl.enqueue_copy(q, out, X)
+    with lock:  # one batch at a time per compiled kernel (threads sharing a GPU, see sharpunclip.aspade)
+        Z = put((np.fft.rfft(Y, N) * N ** -0.5).astype(np.complex64))
+        U, ZB = put(np.zeros((rows, nb), np.complex64)), put(np.zeros((rows, nb), np.complex64))
+        X, LOb, HIb = put(Y.astype(np.float32)), put(LO.astype(np.float32)), put(HI.astype(np.float32))
+        act = np.ones(groups, np.int32)
+        A = put(act)
+        for start in range(0, maxit, chunk):
+            if tick:
+                tick(start / maxit)
+            kern(q, (groups * ls,), (ls,), Z, U, ZB, X, LOb, HIb, A, tw, rev,
+                 np.int32(start + 1), np.int32(min(chunk, maxit - start)), np.float32(eps * eps))
+            cl.enqueue_copy(q, act, A)
+            if not act.any():
+                break
+        out = np.empty((rows, w), np.float32)
+        cl.enqueue_copy(q, out, X)
     return out.astype(np.float64)

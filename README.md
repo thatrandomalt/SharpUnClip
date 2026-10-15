@@ -161,9 +161,21 @@ NVIDIA GeForce RTX 4070 Laptop GPU`, or `NMF on CPU`.
   the CPU.
 - **SPADE engine fallback order:** OpenCL first (with ROCm PyTorch: PyTorch
   first), then PyTorch's GPU, then CPU (PyTorch if installed, else NumPy).
-- **Choosing a GPU:** with two GPUs it picks the stronger one. Set
-  `SHARPUNCLIP_OPENCL_DEVICE` to part of a device name (e.g. `gfx` or
-  `NVIDIA`) to choose.
+- **Choosing a GPU:** by default the SPADE engine takes the GPU with the most
+  compute units and PyTorch its first. With several GPUs, pick one for every
+  engine: the list next to *GPU* in the GUI, or `--gpu-name` with part of its
+  name (`python sharpunclip.py --list-gpus` lists them; identical cards show
+  as `NAME #2`, ...). A GPU PyTorch can't use (e.g. an AMD one with a CUDA
+  build of PyTorch) runs the SPADE engine, and the NMF engine on the CPU. The
+  environment variable `SHARPUNCLIP_OPENCL_DEVICE` does the same.
+- **Several GPUs at once** (command line): `--gpus all` (or `--gpus 4`) shares
+  the work between GPUs, of the chosen name if `--gpu-name` is given; each
+  takes the next piece when it is free, and the result is the same as on one
+  GPU. The NMF engine shares its 20 s chunks between PyTorch's GPUs (so a
+  short song gains little), the SPADE engine its frame batches between the
+  OpenCL GPUs (without `--gpu-name`, only those with at least a quarter of the
+  strongest one's compute units, so an integrated GPU does not slow it down).
+  Unlimit uses one GPU. `python benchmark.py --gpu --gpus all` measures it.
 - **uv users:** `uv venv` and `uv pip install ...` work the same way, or
   prefix the commands with `uv run`.
 
@@ -188,7 +200,7 @@ python gui.py
 
 | Part | What is there |
 |---|---|
-| Top | Input and Output files; *Preset*, *modified*, Save, Load, Undo, Redo; *Process at Hz*, Log, GPU, **Advanced…** |
+| Top | Input and Output files; *Preset*, *modified*, Save, Load, Undo, Redo; *Process at Hz*, Log, GPU (and which one, with several), **Advanced…** |
 | Stage boxes | Declip → Unlimit → Uncompress → Output, in processing order. The checkbox switches the stage on or off, the text sums up its settings, and a click (or Ctrl+1 to Ctrl+4) shows its page |
 | Page (right) | The stage's settings and what they do to this song |
 | Waveform (left) | File info and warnings, Lin \| dB and Fit; the whole song in a strip; the time ruler; one lane per channel (up to 8); a gain lane while Unlimit or Uncompress is on; a readout line |
@@ -530,7 +542,10 @@ The model is a standard digital compressor: peak detection, hard knee.
   - Unlimit: changes the timescale the model sees.
   - Uncompress: your entered compressor times are converted automatically.
 - **GPU** (`--gpu`, or `--gpu opencl` / `cuda` / `xpu` / `mps` to force
-  one): falls back to the CPU; the status line shows the device used.
+  one): falls back to the CPU; the status line shows the device used. Off,
+  everything runs on the CPU, Unlimit included. With several GPUs, the list
+  next to it (`--gpu-name`) picks the one every engine uses; see
+  [Choosing a GPU](#4-check-it-works). The log records it.
 
 ### Advanced… → Declip
 These detection settings apply to the SPADE engine, and to the NMF engine
@@ -609,6 +624,22 @@ python gui.py --selfcheck    # every preset through the real GUI fields, plus th
 python abtest.py --selftest  # the scoring code
 ```
 
+### Benchmark
+
+```
+python benchmark.py          # every algorithm on the CPU and the GPU: time and accuracy
+python benchmark.py --quick  # one run per algorithm family, on 8 s
+```
+
+It runs on `bench/song.flac`, a 16-second song synthesized for it (so its true
+original is known), clipped, limited and compressed the same way on every
+machine. For each algorithm and device it prints the time (also as a multiple
+of the song's length), the improvement over the degraded file, the difference
+from the reference scores in `bench/reference.json`, and how closely the GPU's
+output matches the CPU's. `--json FILE` saves the results to compare machines;
+`-t 8` uses 8 CPU threads; `--cpu` or `--gpu` runs one device only;
+`--gpu-name` picks the GPU.
+
 To measure quality on your own material, render the same project twice, once
 clean and once with clipping/limiting/compression, then:
 
@@ -633,6 +664,7 @@ unreleased music, and too large for GitHub.
 | `waveview.py` | GUI waveform view |
 | `session.py` | GUI logic without Tk: waveform envelopes, region previews, playback |
 | `abtest.py` | Scoring against a known original |
+| `benchmark.py`, `bench/` | Speed and accuracy benchmark, its test song and reference scores |
 | `test_sharpunclip.py` | Automated tests |
 | `weights/` | Pretrained De-limiter weights |
 | `docs/` | README screenshot |

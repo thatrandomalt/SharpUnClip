@@ -83,12 +83,13 @@ _model = {}
 
 
 @torch.no_grad()
-def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0):
+def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0, dev=None):
     """Per-sample gain of the model over its median for x (n, ch): the 100 % unlimit gain.
-    The model runs at 44.1 kHz on crossfaded chunks; only the gain curve is resampled to sr."""
+    The model runs at 44.1 kHz on crossfaded chunks; only the gain curve is resampled to sr.
+    dev: the torch device; None = PyTorch's GPU if there is one, else the CPU."""
     import torchaudio.functional as AF
-    dev = ("cuda" if torch.cuda.is_available() else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available()
-           else "mps" if torch.backends.mps.is_available() else "cpu")
+    dev = dev or ("cuda" if torch.cuda.is_available() else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available()
+                  else "mps" if torch.backends.mps.is_available() else "cpu")
     if torch.version.hip:  # ROCm: skip MIOpen's first-use tuning of every conv shape (as sharpunclip.torch_gpu)
         torch.backends.cudnn.enabled = False
     if dev not in _model:
@@ -121,6 +122,6 @@ def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0):
     return g / np.median(g)
 
 
-def gain(x, sr, amount=0.5, tick=None, seg=6.0, fade=1.0):
+def gain(x, sr, amount=0.5, tick=None, seg=6.0, fade=1.0, dev=None):
     """Per-sample unlimit gain for x (n, ch): raw_gain raised to `amount`."""
-    return raw_gain(x, sr, tick, seg, fade) ** amount
+    return raw_gain(x, sr, tick, seg, fade, dev) ** amount

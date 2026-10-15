@@ -231,7 +231,7 @@ def test_unlimit_linked_gain():
     t = np.arange(2 * sr) / sr
     beat = np.exp(-(t % 0.5) * 12) * np.sin(2 * np.pi * 60 * t)
     x = np.tanh(3 * np.stack([beat + 0.2 * np.sin(2 * np.pi * 440 * t)] * 2, 1)) * 0.9
-    g = unlimit.gain(x, sr, 0.5)
+    g = unlimit.gain(x, sr, 0.5, dev="cpu")  # process() without a GPU: the CPU
     assert g.shape == (len(x),) and np.all(np.isfinite(g)) and np.all(g > 0)
     assert abs(np.median(g) - 1) < 1e-9
     out = U.process(x, sr, dict(U.DEFAULTS, declip=False, unlimit=50))
@@ -249,7 +249,7 @@ def test_unlimit_adds_declip_correction():
     cl = np.clip(src, -0.9, 0.9)
     opt = dict(SPADE, unlimit=True, unlimit_amount=15.0)
     d = U.process(cl, sr, dict(opt, unlimit=False))
-    g = unlimit.gain(cl, sr, 0.15)
+    g = unlimit.gain(cl, sr, 0.15, dev="cpu")  # process() without a GPU: the CPU
     out = U.process(cl, sr, opt)
     assert np.allclose(out, cl * g[:, None] + (d - cl), rtol=0, atol=1e-12)
 
@@ -593,7 +593,7 @@ def test_stage_split_equals_one_call():
         if cfg["unlimit"]:
             import unlimit
             hB["unlimit_ref"] = x * U._db2lin(cfg["input_gain"])  # stage A's input: the gain applies to it
-            hB["unlimit_g"] = unlimit.raw_gain(hB["unlimit_ref"], sr)
+            hB["unlimit_g"] = unlimit.raw_gain(hB["unlimit_ref"], sr, dev="cpu")  # process() without a GPU
         B = session.stage_b(session.stage_cfg_b(cfg), D, sr, hB)
         assert np.array_equal(B, U.process(x, sr, cfg)), cfg["declip"]
         assert hB["uc_gain"].shape == x.shape
@@ -873,6 +873,88 @@ def test_gpu_probe_order():
     finally:
         torch.cuda.is_available, torch.version.hip, sharpunclip_cl.device, torch.backends.cudnn.enabled = real
         U.torch_gpu.cache_clear()
+
+
+def test_nmf_multi_device():
+    # --gpus: the NMF engine's chunks shared between devices (here one device twice: two threads) give
+    # the one-device result, in order; and the CLI accepts and logs it.
+    if not _has_torch():
+        return
+    from betterdeclipper import engine as E
+    sr = 16000
+    cl = np.clip(_kick_stereo(sr, secs=3), -0.9, 0.9)
+    for dev in ("cpu",) + ((U.torch_gpu(),) if U.torch_gpu() else ()):
+        kw = dict(preset="fast", chunk_s=1.0, verbose=False)
+        one = E.declip(cl, sr, device=dev, **kw)[0]
+        two = E.declip(cl, sr, device=[dev, dev], **kw)[0]
+        assert np.array_equal(one, two), (dev, np.abs(one - two).max())
+    d = tempfile.mkdtemp()
+    inp = os.path.join(d, "in.wav")
+    sf.write(inp, cl, sr, subtype="FLOAT")
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharpunclip.py"),
+                        inp, "-o", os.path.join(d, "out.wav"), "--nmf-quality", "fast", "--gpus", "all",
+                        "--log", os.path.join(d, "run.log")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "gpus=all" in open(os.path.join(d, "run.log"), encoding="utf-8").read()
+
+
+def test_spade_multi_device():
+    # --gpus: SPADE's frame batches shared between devices (here one device twice: two threads) give
+    # the one-device result, with progress in order; on every backend.
+    sr = 16000
+    cl = np.clip(_kick_stereo(sr, secs=2), -0.9, 0.9)
+    m = np.abs(cl) >= 0.9 * 0.999
+    lo, hi = cl.copy(), cl.copy()
+    lo[m & (cl > 0)], hi[m & (cl > 0)] = 0.9, 2.5 * cl[m & (cl > 0)]
+    hi[m & (cl < 0)], lo[m & (cl < 0)] = -0.9, 2.5 * cl[m & (cl < 0)]
+    real = U._spade_devices
+    for name in _backends():
+        xp, dev = U.spade_backend(name)
+        run = lambda p=None: U.aspade(cl, lo, hi, 512, 4, xp=xp, dev=dev, batch=32, group=2, progress=p)
+        one = run()
+        D = xp.device() if dev == "opencl" else dev
+        done = []
+        try:
+            U._spade_devices = lambda xp_, dev_: [D, D]
+            two = run(lambda f, d, o: d is None or done.append(d))
+        finally:
+            U._spade_devices = real
+        assert np.array_equal(one, two), (name, np.abs(one - two).max())
+        assert len(done) > 2 and done == sorted(done), (name, done)
+
+
+def test_gpu_choice():
+    # --gpu-name / the GUI's GPU list: one GPU for every engine, by part of its name; "NAME #2" is the
+    # second GPU of that name. PyTorch gets its index (simulated: two identical CUDA cards); every real
+    # OpenCL GPU is reached by the name list_gpus gives it.
+    try:
+        import torch
+    except ImportError:
+        return
+    real = torch.cuda.is_available, torch.cuda.device_count, torch.cuda.get_device_name, torch.version.hip
+    try:
+        torch.cuda.is_available, torch.cuda.device_count = (lambda: True), (lambda: 2)
+        torch.cuda.get_device_name, torch.version.hip = (lambda i=None: "Card A"), None
+        for name, want in (("", "cuda"), ("card a", "cuda"), ("Card A #2", "cuda:1"), ("Card A #3", None), ("B", None)):
+            U.set_gpu(name)
+            assert U.torch_gpu() == want, (name, U.torch_gpu())
+        U.set_gpu("Card A #2")
+        assert U._nmf_device("opencl") == "cuda:1" and U.is_gpu("cuda:1") and not U.is_gpu("cpu")
+    finally:
+        torch.cuda.is_available, torch.cuda.device_count, torch.cuda.get_device_name, torch.version.hip = real
+        U.set_gpu("")
+    try:
+        import sharpunclip_cl as C
+        labels = U._numbered([C.label(d) for d in C.gpus()])
+    except Exception:
+        labels = []
+    try:
+        for lab in labels:
+            U.set_gpu(lab)
+            xp, dev = U.spade_backend("opencl")
+            assert dev == "opencl" and C.label(C.device()) == lab.split(" #")[0], lab
+    finally:
+        U.set_gpu("")
 
 
 if __name__ == "__main__":

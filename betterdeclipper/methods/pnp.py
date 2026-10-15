@@ -168,7 +168,7 @@ def declip_pnp(y, m_hi, m_lo, th_hi, th_lo, sr=44100, win_len=4096, hop=1024, ne
                chan_gain=None, fweight=None, pilot=None, pilot_mix=0.0, gain_mode="pew", relax=1.0,
                device="cpu", dtype=torch.float32, callback=None, x_init=None, lam_ref=None,
                den_type="pew", nmf_rank=32, nmf_iter=2, nmf_beta=1.0, nmf_smooth=0.0, nmf_rank_ratio=None,
-               max_gain=None, dips=None):
+               max_gain=None, dips=None, graphs=True):
     T, C = y.shape
     scale = threshold_scale(th_hi, th_lo)
     lb, ub = make_bounds(y / scale, m_hi, m_lo, th_hi / scale, th_lo / scale, max_gain)
@@ -235,13 +235,14 @@ def declip_pnp(y, m_hi, m_lo, th_hi, th_lo, sr=44100, win_len=4096, hop=1024, ne
         coefs.append((t - 1) / tn if momentum else 0.0)
         t = tn
 
-    use_graph = (torch.device(device).type == "cuda" and callback is None and relax == 1.0 and n_iter > 4
+    use_graph = (graphs and torch.device(device).type == "cuda" and callback is None and relax == 1.0 and n_iter > 4
                  and os.environ.get("BD_CUDA_GRAPHS", "1") != "0"
                  and not torch.version.hip)  # ROCm: graph capture can hang, which the fallback can't catch
     x = None
     if use_graph:
         try:
-            x = _solve_graph(x0, lam2s, coefs, proj, mix, unmix, den)
+            with torch.cuda.device(x0.device):  # capture on the solve's GPU, also when it is not the current one
+                x = _solve_graph(x0, lam2s, coefs, proj, mix, unmix, den)
         except Exception as e:  # never fail because of graph capture: redo the solve eagerly
             warnings.warn(f"CUDA graph path failed ({e!r}); falling back to eager mode")
             den = den.fresh()

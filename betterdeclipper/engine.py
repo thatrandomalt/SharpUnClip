@@ -108,6 +108,36 @@ def _chunks(T, chunk, ctx, fade):
         yield max(0, ia - ctx), min(T, ib + ctx), ia, ib
 
 
+def _over_devices(fn, items, devices):
+    """fn(item, device) of each item, yielded in order. With several devices, one thread per device,
+    each taking the next item when it is free, so devices of different speeds share the work."""
+    if len(devices) == 1:
+        for it in items:
+            yield fn(it, devices[0])
+        return
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    free = queue.Queue()
+    for d in devices:
+        free.put(d)
+
+    def run(it):
+        torch.set_flush_denormal(True)  # per thread, as on the engine's own thread
+        d = free.get()
+        try:
+            if d.type == "cuda":  # each thread on its own stream and device
+                with torch.cuda.device(d), torch.cuda.stream(torch.cuda.Stream(d)):
+                    return fn(it, d)
+            return fn(it, d)
+        finally:
+            free.put(d)
+    pool = ThreadPoolExecutor(len(devices))
+    try:
+        yield from pool.map(run, items)
+    finally:  # an error or a cancel: no more items start
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def resolve_device(device="auto"):
     """'auto' -> first CUDA GPU if this torch build has CUDA and a GPU is present, else CPU."""
     if device in (None, "auto"):
@@ -207,12 +237,14 @@ def declip(y, sr, preset="normal", levels=None, chunk_s=20.0, ctx_s=1.5, fade_s=
     instead of analyzing y: same input with another preset/mode, or another track clipped the same way.
     full_analysis: also run the soft-shoulder search in mode 'hard', so that info['analysis']['data'] can
     be reused with every mode.
-    device: 'auto' (CUDA GPU if available, else CPU), 'cpu', 'cuda' or 'cuda:N'.
+    device: 'auto' (CUDA GPU if available, else CPU), 'cpu', 'cuda' or 'cuda:N'; a list of devices
+    shares the chunks of the PnP/NMF models between them (everything else runs on the first).
     lam_refs: reuse a lambda reference (lam_refs_for() of the whole file) instead of computing it from y."""
     t_start = time.time()
     if threads:
         torch.set_num_threads(threads)
-    device = resolve_device(device)
+    devices = [resolve_device(d) for d in device] if isinstance(device, (list, tuple)) else None
+    device = devices[0] if devices else resolve_device(device)
     y = np.asarray(y, dtype=np.float64)
     mono = y.ndim == 1
     if mono:
@@ -295,24 +327,27 @@ def declip(y, sr, preset="normal", levels=None, chunk_s=20.0, ctx_s=1.5, fade_s=
         # global (per-chunk) models: overlapping chunks with context, crossfaded interiors
         acc = np.zeros((T, C))
         wsum = np.zeros(T)
-        for a, b, ia, ib in spans:
+
+        def chunk(span, dev, kw=kw, win_ms=win_ms, kind=kind):
+            a, b, ia, ib = span
+            if not clipped[a:b].any():
+                return y[ia:ib]
+            thh = th_hi if th_hi.ndim == 1 else th_hi[a:b]
+            thl = th_lo if th_lo.ndim == 1 else th_lo[a:b]
+            kwc = dict(kw)
+            if gcap is not None and np.ndim(gcap) == 2:
+                kwc["max_gain"] = gcap[a:b]
+            if dips is not None and kind != "spade":
+                kwc["dips"] = (dips[0][a:b], dips[1][a:b], dips[2], dips[3])
+            return declip_pnp(y[a:b], m_hi[a:b], m_lo[a:b], thh, thl, sr=sr, lam_ref=lam_refs[win_ms],
+                              device=dev, graphs=not devices or len(devices) == 1,  # capture vs threads: off
+                              **kwc)[ia - a:ib - a]
+        for (a, b, ia, ib), est in zip(spans, _over_devices(chunk, spans, devices or [device])):
             wt = np.ones(ib - ia)
             if ia > 0:
                 wt[:fade] = np.linspace(0, 1, fade + 2)[1:-1][: min(fade, ib - ia)]
             if ib < T:
                 wt[-fade:] = np.minimum(wt[-fade:], np.linspace(1, 0, fade + 2)[1:-1])
-            if clipped[a:b].any():
-                thh = th_hi if th_hi.ndim == 1 else th_hi[a:b]
-                thl = th_lo if th_lo.ndim == 1 else th_lo[a:b]
-                kwc = dict(kw)
-                if gcap is not None and np.ndim(gcap) == 2:
-                    kwc["max_gain"] = gcap[a:b]
-                if dips is not None and kind != "spade":
-                    kwc["dips"] = (dips[0][a:b], dips[1][a:b], dips[2], dips[3])
-                est = declip_pnp(y[a:b], m_hi[a:b], m_lo[a:b], thh, thl, sr=sr, lam_ref=lam_refs[win_ms],
-                                 device=device, **kwc)[ia - a:ib - a]
-            else:
-                est = y[ia:ib]
             acc[ia:ib] += est * wt[:, None]
             wsum[ia:ib] += wt
             tick()

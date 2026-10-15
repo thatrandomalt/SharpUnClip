@@ -302,6 +302,8 @@ def declip(y, sr, preset="normal", levels=None, chunk_s=20.0, ctx_s=1.5, fade_s=
         lam_refs = lam_refs_for(y, sr, threshold_scale(th_hi, th_lo), models, device)
     chunk, ctx, fade = int(chunk_s * sr), int(ctx_s * sr), max(2, int(fade_s * sr))
     spans = list(_chunks(T, chunk, ctx, fade))
+    if len(spans) < 2:
+        devices = None  # one chunk: one device (and CUDA graphs)
     n_steps = sum(1 if kind == "spade" else len(spans) for kind, _, _ in models)
     step = [0]
 

@@ -7,6 +7,7 @@ from collections import OrderedDict
 import numpy as np
 import soundfile as sf
 from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, is_gpu, torch_gpu, list_gpus, gpu_name, set_gpu,
+                         set_gpus,
                          settings_from_cfg,
                          spade_backend, backend_name, RunLog, env_info)
 import session
@@ -435,9 +436,11 @@ class App:
         return "break"
 
     def _pick_gpu(self):
-        """The GPU list (several GPUs): every engine moves to the one picked; previews follow."""
+        """The GPU list (several GPUs): every engine moves to the one picked, or (All GPUs) shares its work
+        between all of them (--gpus all); previews follow."""
         v = self.gpu_pick.get()
-        set_gpu("" if v == "Automatic" else v)
+        set_gpu("" if v in ("Automatic", "All GPUs") else v)
+        set_gpus(0 if v == "All GPUs" else 1)
         self.gpu_dev = spade_backend(True)[1]
         if self.torch:
             self.tgpu = torch_gpu()
@@ -591,7 +594,7 @@ class App:
         if len(gpus) > 1:
             cur = next((g for g in gpus if gpu_name() and gpu_name().lower() == g.lower()), "Automatic")
             self.gpu_pick = tk.StringVar(value=cur)
-            pick = ttk.Combobox(bar, textvariable=self.gpu_pick, values=["Automatic"] + gpus, state="readonly",
+            pick = ttk.Combobox(bar, textvariable=self.gpu_pick, values=["Automatic", "All GPUs"] + gpus, state="readonly",
                                 width=min(30, max(10, *map(len, gpus))), takefocus=0)
             pick.pack(side="right")
             pick.bind("<<ComboboxSelected>>", lambda e: self._pick_gpu())
@@ -2555,6 +2558,12 @@ def _selfcheck():
     assert a2.wv.pv is not None, a2.badge.cget("text")
     a2.heavy.cancel(); top.destroy()
     session.sd = real_sd
+    if hasattr(app, "gpu_pick"):  # several GPUs: All GPUs shares renders between them, Automatic is one
+        import sharpunclip
+        app.gpu_pick.set("All GPUs"); app._pick_gpu()
+        assert sharpunclip._GPUS[0] == 0 and gpu_name() == "" and is_gpu(app.gpu_dev)
+        app.gpu_pick.set("Automatic"); app._pick_gpu()
+        assert sharpunclip._GPUS[0] == 1
     root.destroy()
     print("selfcheck OK")
 

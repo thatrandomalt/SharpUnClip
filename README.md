@@ -168,7 +168,8 @@ NVIDIA GeForce RTX 4070 Laptop GPU`, or `NMF on CPU`.
   as `NAME #2`, ...). A GPU PyTorch can't use (e.g. an AMD one with a CUDA
   build of PyTorch) runs the SPADE engine, and the NMF engine on the CPU. The
   environment variable `SHARPUNCLIP_OPENCL_DEVICE` does the same.
-- **Several GPUs at once** (command line): `--gpus all` (or `--gpus 4`) shares
+- **Several GPUs at once:** *All GPUs* in the GUI's GPU list, or `--gpus all`
+  (or `--gpus 4`) on the command line, shares
   the work between GPUs, of the chosen name if `--gpu-name` is given; each
   takes the next piece when it is free, and the result is the same as on one
   GPU. The NMF engine shares its 20 s chunks between PyTorch's GPUs (so a
@@ -200,7 +201,7 @@ python gui.py
 
 | Part | What is there |
 |---|---|
-| Top | Input and Output files; *Preset*, *modified*, Save, Load, Undo, Redo; *Process at Hz*, Log, GPU (and which one, with several), **Advanced…** |
+| Top | Input and Output files; *Preset*, *modified*, Save, Load, Undo, Redo; *Process at Hz*, Log, GPU (and which one, or all, with several), **Advanced…** |
 | Stage boxes | Declip → Unlimit → Uncompress → Output, in processing order. The checkbox switches the stage on or off, the text sums up its settings, and a click (or Ctrl+1 to Ctrl+4) shows its page |
 | Page (right) | The stage's settings and what they do to this song |
 | Waveform (left) | File info and warnings, Lin \| dB and Fit; the whole song in a strip; the time ruler; one lane per channel (up to 8); a gain lane while Unlimit or Uncompress is on; a readout line |
@@ -544,7 +545,8 @@ The model is a standard digital compressor: peak detection, hard knee.
 - **GPU** (`--gpu`, or `--gpu opencl` / `cuda` / `xpu` / `mps` to force
   one): falls back to the CPU; the status line shows the device used. Off,
   everything runs on the CPU, Unlimit included. With several GPUs, the list
-  next to it (`--gpu-name`) picks the one every engine uses; see
+  next to it picks the one every engine uses (`--gpu-name`), or *All GPUs*
+  to share the work between them (`--gpus all`); see
   [Choosing a GPU](#4-check-it-works). The log records it.
 
 ### Advanced… → Declip

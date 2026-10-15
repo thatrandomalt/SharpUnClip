@@ -104,7 +104,11 @@ the CPU, and please report it.
   Windows 11: AMD's PyTorch for Windows, for Radeon RX 7000/9000 and Ryzen AI
   300 / AI Max (Python 3.12); follow
   [AMD's guide](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html).
-  Older Radeons and most integrated ones aren't supported by ROCm.
+  Older Radeons and most integrated ones aren't supported by ROCm. Install
+  torch and torchaudio together from the same ROCm source: a later plain
+  `pip install torchaudio` (or `pip install -r requirements.txt` with a newer
+  torchaudio) can swap in the CPU-only torch from PyPI. Check with the command
+  in step 4: it should say `NMF on ROCm: <your GPU>`.
 - **Intel Arc and Core Ultra (Windows, Linux):** with a current Intel driver,
   `pip install torch torchaudio --index-url https://download.pytorch.org/whl/xpu`
 - **Apple silicon:** a plain `pip install torch torchaudio` includes the MPS
@@ -191,7 +195,10 @@ python gui.py
   *from <file>* while they match the file.
 - **Undo / Redo** (Ctrl+Z, Ctrl+Y) step through finished changes.
 - **Log** writes `<output>.log` next to the output on every render: settings,
-  device, timing and peak, or the full error if it fails.
+  device, PyTorch and GPU runtime versions, timing and peak, or the full error
+  if it fails. It is written as the render goes, so a crash or a hang still
+  leaves the start of the run (and, for a crash, where it happened). Send it
+  with any bug report.
 - **Render** draws the output (green) over the input (grey) as it goes, with
   time left and speed. **Cancel** stops without writing anything. Output made
   with other settings than the current ones is drawn dimmed, and the header
@@ -410,7 +417,8 @@ python sharpunclip.py comp.wav --no-declip --uncompress 50 \
   overrides that one setting.
 - **Stages:** `--unlimit` / `--uncompress` switch a stage on, optionally with
   an amount (e.g. `--unlimit 30`); `0` switches it off.
-- **Logging:** `--log FILE` appends a run log.
+- **Logging:** `--log FILE` appends a run log, as the GUI's *Log* does, also
+  when the run fails.
 - **Files:** any input libsndfile reads (wav, flac, ogg, aiff, …). Output is
   always 32-bit float WAV, because restored peaks go above full scale.
 - `python sharpunclip.py --help` lists every flag.

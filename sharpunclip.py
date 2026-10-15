@@ -11,12 +11,14 @@ uncompress are optional later stages. See METHODS.md for the methods.
 """
 import argparse
 import copy
+import faulthandler
 import functools
 import json
 import math
 import os
 import sys
 import time
+import traceback
 
 import numpy as np
 
@@ -51,6 +53,8 @@ def torch_gpu():
     except Exception:
         return None
     if torch.cuda.is_available():
+        if torch.version.hip:  # ROCm: MIOpen tunes each new conv shape on first use (minutes, looks hung);
+            torch.backends.cudnn.enabled = False  # PyTorch's own GPU conv is fine for these small kernels
         return "cuda"
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
@@ -90,7 +94,11 @@ def backend_name(xp, dev, opt=None):
         except Exception:
             return "NMF engine needs PyTorch"
         d = _nmf_device(dev)
-        return "NMF on " + (_torch_gpu_name(d) if d != "cpu" else "CPU")
+        if d != "cpu":
+            return "NMF on " + _torch_gpu_name(d)
+        if dev in GPU_DEVS:  # a GPU was found (OpenCL), but this PyTorch build can't use it
+            return f"NMF on CPU (PyTorch {torch.__version__} has no GPU support for this GPU; see README)"
+        return "NMF on CPU"
     if dev == "opencl":
         return "OpenCL: " + xp.device().name.strip()
     if dev in ("cuda", "xpu", "mps"):
@@ -100,11 +108,13 @@ def backend_name(xp, dev, opt=None):
 
 def _torch_gpu_name(dev):
     import torch
-    if dev == "cuda":
-        return ("ROCm: " if torch.version.hip else "CUDA: ") + torch.cuda.get_device_name()
-    if dev == "xpu":
-        return "Intel XPU: " + torch.xpu.get_device_name()
-    return "Apple MPS"
+    kind = {"cuda": "ROCm" if torch.version.hip else "CUDA", "xpu": "Intel XPU", "mps": "Apple MPS"}[dev]
+    if dev == "mps":
+        return kind
+    try:
+        return f"{kind}: " + getattr(torch, dev).get_device_name()
+    except Exception:  # a name is never worth failing a render for
+        return kind
 
 
 def _nmf_device(dev):
@@ -589,10 +599,39 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=No
     return out[:, 0] if mono else out
 
 
-def _write_log(path, lines):
-    with open(path, "a") as f:
-        for ln in lines:
-            f.write(ln + "\n")
+class RunLog:
+    """Run log (appended, UTF-8), written line by line as the run goes, so a failed run still leaves
+    its header and error, and a native crash or hang (GPU driver) faulthandler's stack dump.
+    path None = off; a log that can't be opened never stops the run."""
+
+    def __init__(self, path):
+        try:
+            self.f = open(path, "a", encoding="utf-8", errors="replace", buffering=1) if path else None
+        except OSError:
+            self.f = None
+        if self.f:
+            faulthandler.enable(self.f)
+
+    def __call__(self, line):
+        if self.f:
+            self.f.write(line + "\n")
+
+    def close(self):
+        if self.f:
+            faulthandler.disable()
+            self.f.close()
+            self.f = None
+
+
+def env_info():
+    """Python, PyTorch and GPU runtime versions, for logs and bug reports."""
+    s = f"python={sys.version.split()[0]} platform={sys.platform}"
+    try:
+        import torch
+        s += f" torch={torch.__version__} hip={torch.version.hip} cuda={torch.version.cuda} torch_gpu={torch_gpu()}"
+    except Exception as e:
+        s += f" torch=unavailable ({e})"
+    return s
 
 
 def main():
@@ -718,33 +757,40 @@ def main():
     print("using " + backend_name(xp, dev, opt), file=sys.stderr)
 
     t0 = time.time()
-    log_lines = [f"SharpUnClip {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                 f"input={a.input} backend={backend_name(xp, dev, opt)} threads={threads}"]
-    x, sr = sf.read(a.input, always_2d=True)  # (n, ch)
-    log_lines.append(f"sr={sr} samples={x.shape[0]} channels={x.shape[1]}")
-    log_lines.append(" ".join(f"{k}={v}" for k, v in opt.items()))
-    out_path = a.out or os.path.splitext(a.input)[0] + "_declipped.wav"
-    shown, info = [-1], {}
+    log = RunLog(a.log)
+    try:
+        log(f"SharpUnClip {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        log(f"input={a.input} backend={backend_name(xp, dev, opt)} threads={threads}")
+        log(env_info())
+        x, sr = sf.read(a.input, always_2d=True)  # (n, ch)
+        log(f"sr={sr} samples={x.shape[0]} channels={x.shape[1]}")
+        log(" ".join(f"{k}={v}" for k, v in opt.items()))
+        out_path = a.out or os.path.splitext(a.input)[0] + "_declipped.wav"
+        shown, info = [-1], {}
 
-    def progress(f, *_):
-        if int(f * 100) != shown[0]:
-            shown[0] = int(f * 100)
-            print(f"\r{f:5.0%}", end="", file=sys.stderr, flush=True)
-    out = process(x, sr, opt, xp=xp, dev=dev, progress=progress, info=info)
-    print(file=sys.stderr)
-    if opt["declip"] and info.get("flagged") == 0:
-        print("declip: no clipping found, so it left the audio unchanged"
-              + (" (on a limited master try --no-auto-detect, or --preset Unmaster)"
-                 if opt["engine"] == "NMF" and opt["auto_detect"] else ""), file=sys.stderr)
-    if "flagged" in info:
-        log_lines.append(f"declip flagged={info['flagged']:.4%}")
-    if a.report:
-        for c in range(out.shape[1]):
-            print(f"ch{c}: output peak={np.abs(out[:, c]).max():.3f}")
-    sf.write(out_path, out, sr, subtype="FLOAT")  # restored peaks exceed 1.0
-    log_lines.append(f"output={out_path} peak={np.abs(out).max():.3f} elapsed={time.time()-t0:.2f}s")
-    if a.log:
-        _write_log(a.log, log_lines)
+        def progress(f, *_):
+            if int(f * 100) != shown[0]:
+                shown[0] = int(f * 100)
+                print(f"\r{f:5.0%}", end="", file=sys.stderr, flush=True)
+        out = process(x, sr, opt, xp=xp, dev=dev, progress=progress, info=info)
+        print(file=sys.stderr)
+        if opt["declip"] and info.get("flagged") == 0:
+            print("declip: no clipping found, so it left the audio unchanged"
+                  + (" (on a limited master try --no-auto-detect, or --preset Unmaster)"
+                     if opt["engine"] == "NMF" and opt["auto_detect"] else ""), file=sys.stderr)
+        if "flagged" in info:
+            log(f"declip flagged={info['flagged']:.4%}")
+        if a.report:
+            for c in range(out.shape[1]):
+                print(f"ch{c}: output peak={np.abs(out[:, c]).max():.3f}")
+        sf.write(out_path, out, sr, subtype="FLOAT")  # restored peaks exceed 1.0
+        log(f"output={out_path} peak={np.abs(out).max():.3f} elapsed={time.time()-t0:.2f}s")
+    except BaseException:  # also Ctrl+C: the log says how the run ended
+        log("error:\n" + traceback.format_exc())
+        raise
+    finally:
+        log("")
+        log.close()
     print(f"wrote {out_path}")
 
 

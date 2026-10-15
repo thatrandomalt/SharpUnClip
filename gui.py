@@ -7,7 +7,7 @@ from collections import OrderedDict
 import numpy as np
 import soundfile as sf
 from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, GPU_DEVS, torch_gpu, settings_from_cfg,
-                         spade_backend, backend_name, _write_log)
+                         spade_backend, backend_name, RunLog, env_info)
 import session
 from session import Pyramid, Song
 
@@ -1724,33 +1724,33 @@ class App:
                 raise _Cancelled
             self.q.put(("p", frac, done, out))
         t0 = time.time()
-        log = [f"SharpUnClip GUI {time.strftime('%Y-%m-%d %H:%M:%S')}",
-               f"input={self.path} output={outp} sr={sr} samples={len(x)} channels={x.shape[1]}",
-               f"backend={backend_name(*spade_backend(cfg.get('gpu')), settings_from_cfg(cfg))}",
-               "settings " + " ".join(f"{k}={v}" for k, v in sorted(cfg.items()))]
-        an = (hints or {}).get("nmf_analysis")
-        if an is not None:
-            k = cfg["nmf_knee"] or an["shoulder"]["knee"]
-            log.append(f"analysis from GUI kinds={','.join(r['kind'] for row in an['refs'] for r in row)} "
-                       f"knee={'none' if k is None else f'{k:.2f}'}")
+        log = RunLog(os.path.splitext(outp)[0] + ".log" if log_on else None)
         info = {}
-        try:
+        try:  # everything, so no failure can end the thread without a status and a log
+            log(f"SharpUnClip GUI {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            log(f"input={self.path} output={outp} sr={sr} samples={len(x)} channels={x.shape[1]}")
+            log(f"backend={backend_name(*spade_backend(cfg.get('gpu')), settings_from_cfg(cfg))}")
+            log(env_info())
+            log("settings " + " ".join(f"{k}={v}" for k, v in sorted(cfg.items())))
+            an = (hints or {}).get("nmf_analysis")
+            if an is not None:
+                k = cfg["nmf_knee"] or an["shoulder"]["knee"]
+                log(f"analysis from GUI kinds={','.join(r['kind'] for row in an['refs'] for r in row)} "
+                    f"knee={'none' if k is None else f'{k:.2f}'}")
             with session.GPU_LOCK:  # a preview job still running stops at its next tick
                 out = compute(x, sr, cfg, progress, hints, info)
             sf.write(outp, out, sr, subtype="FLOAT")
-            log.append(f"done peak={np.abs(out).max():.3f} elapsed={time.time() - t0:.1f}s")
+            log(f"done peak={np.abs(out).max():.3f} elapsed={time.time() - t0:.1f}s")
             self.q.put(("done", out, outp, info))
         except _Cancelled:
-            log.append(f"cancelled after {time.time() - t0:.1f}s")
+            log(f"cancelled after {time.time() - t0:.1f}s")
             self.q.put(("cancelled",))
         except Exception as e:
-            log.append("error:\n" + traceback.format_exc())
+            log("error:\n" + traceback.format_exc())
             self.q.put(("error", str(e)))
-        if log_on:
-            try:
-                _write_log(os.path.splitext(outp)[0] + ".log", log + [""])
-            except OSError:
-                pass
+        finally:
+            log("")
+            log.close()
 
     def _poll(self):
         msgs = []
@@ -2486,7 +2486,7 @@ def _selfcheck():
             end = time.time() + 120
             while app.rendering and time.time() < end:
                 root.update(); time.sleep(0.01)
-            log = open(os.path.join(d, "out.log")).read()
+            log = open(os.path.join(d, "out.log"), encoding="utf-8").read()
             assert "analysis from GUI kinds=clip,clip,clip,clip knee=1.00" in log, log
             assert np.array_equal(app.full, compute(app.x, sr, app.collect()))
             app.log.set(False); settle()

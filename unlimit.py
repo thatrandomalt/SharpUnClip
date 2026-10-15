@@ -89,6 +89,8 @@ def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0):
     import torchaudio.functional as AF
     dev = ("cuda" if torch.cuda.is_available() else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available()
            else "mps" if torch.backends.mps.is_available() else "cpu")
+    if torch.version.hip:  # ROCm: skip MIOpen's first-use tuning of every conv shape (as sharpunclip.torch_gpu)
+        torch.backends.cudnn.enabled = False
     if dev not in _model:
         m = DeLimiter()
         m.load_state_dict(torch.load(WEIGHTS, map_location="cpu", weights_only=True), strict=True)

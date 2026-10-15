@@ -691,6 +691,17 @@ def test_cli_nmf_knee():
     assert "nmf_quality=normal+spade" in log and "soft_clip=cubic" in log, log
 
 
+def test_cli_log_on_failure():
+    # A failed run still logs its header, the PyTorch/GPU versions and the error's traceback.
+    d = tempfile.mkdtemp()
+    lp = os.path.join(d, "run.log")
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharpunclip.py"),
+                        os.path.join(d, "missing.wav"), "--log", lp], capture_output=True, text=True)
+    assert r.returncode != 0
+    log = open(lp, encoding="utf-8").read()
+    assert "input=" in log and "python=" in log and "error:" in log and "Traceback" in log, log
+
+
 def test_nmf_preview_close():
     # NMF auto detection: the render reusing the GUI's analysis (ceilings, shoulder) is the CLI's, and a
     # region preview (that analysis, the whole song's lambda reference, the span widened until the NMF rank

@@ -121,8 +121,11 @@ high with twice the iterations.
    (NVIDIA, or AMD through a ROCm build, which PyTorch presents as CUDA), Intel
    XPU or Apple MPS; otherwise the CPU. The engine is plain float32 PyTorch, so
    the only device-specific code is CUDA graphs (CUDA only, off on ROCm) and
-   the memory query that sizes the SPADE stage's batches. Ops MPS lacks fall
-   back to the CPU (`PYTORCH_ENABLE_MPS_FALLBACK`).
+   the memory query that sizes the SPADE stage's batches. On ROCm, MIOpen is
+   switched off: it tunes every new convolution shape on first use, which can
+   take minutes per shape, and the engine's smoothing convolutions change
+   shape between chunks; PyTorch's own GPU convolution runs them instead. Ops
+   MPS lacks fall back to the CPU (`PYTORCH_ENABLE_MPS_FALLBACK`).
 4. **normal+spade** (an *NMF quality* option, off by default). SharpUnClip's
    own linked SPADE (section 2.4: 512-sample frames, 16× overlap, capped at
    2.5|y|) joins the engine's two models below 4 kHz, weighted NMF 0.52,
@@ -435,7 +438,7 @@ integrated GPU).
 | `test_spade_region_preview_exact` | A SPADE region preview equals the render's samples on every backend, also across a GPU batch boundary; a span 7 samples off does not. |
 | `test_uncompress_warmup` | An uncompress preview that starts before the region is within 0.001 dB of the render there (ratios 2 and 10); the lead-in is capped at 10 s. |
 | `test_nmf_preview_close` | A render reusing the GUI's NMF analysis equals the CLI's; an NMF region preview is within 30 dB SNR of the render. |
-| `test_cli_*` | End to end: presets, `.json` presets, logging, stereo float output, uncompress flags. |
+| `test_cli_*` | End to end: presets, `.json` presets, logging (also of a failed run, with its traceback), stereo float output, uncompress flags. |
 
 `python gui.py --selfcheck` drives the real window's input fields with every
 preset and checks they reach the engine unchanged. It also checks the GUI's
@@ -762,9 +765,11 @@ Each idea below was measured with the same protocol and dropped.
   listening drove the investigation of the "watery" sound and the peak
   height.
 - **NMF engine GPU support is tested on NVIDIA only.** It runs on whatever GPU
-  PyTorch supports: AMD through a ROCm build (CUDA graphs are switched off
-  there), Intel through XPU, Apple through MPS. Those paths run the same code
-  but are untested here; only the device choice is tested, by simulation.
+  PyTorch supports: AMD through a ROCm build (CUDA graphs and MIOpen are
+  switched off there), Intel through XPU, Apple through MPS. Those paths run
+  the same code but are untested here; only the device choice is tested, by
+  simulation. A first ROCm test failed, with no error captured (logs were only
+  written after a successful run then; they are now written as the run goes).
   GPUs PyTorch doesn't support (e.g. Radeons older than RX 7000 on Windows)
   run the NMF engine on the CPU. The SPADE engine runs on any GPU vendor
   through OpenCL.

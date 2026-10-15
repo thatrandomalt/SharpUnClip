@@ -144,6 +144,8 @@ class _Cancelled(Exception):
 class App:
     def __init__(self, root):
         self.root = root
+        if root.tk.call("tk", "windowingsystem") == "x11":  # X input methods (IBus, fcitx) dropped BackSpace
+            root.tk.call("tk", "useinputmethods", "0")  # in the text boxes and the Browse dialog (Linux)
         self.V, self.T, self.C, self.labels, self.ranges = {}, {}, {}, {}, {}
         self.grey, self.bound, self.stage_of = [], {}, {}  # (key, widget) greyed by _sync; key -> widgets; key -> toggle
         self._dirty, self._pending = set(), None
@@ -158,7 +160,7 @@ class App:
         self.light, self.gen, self.region_user_set = session.Worker(self.q), 0, False
         # region previews: the heavy worker (shares the GPU with renders), stage-A results (LRU), the
         # unlimit and uncompress gains, the B shown, the B-key of the render drawn and its finished output
-        self.heavy, self.est, self.lru = session.Worker(self.q, session.GPU_LOCK), session.Estimates(), OrderedDict()
+        self.heavy, self.est, self.lru = session.Worker(self.q, session.GPU_LOCK, session.release_memory), session.Estimates(), OrderedDict()
         self.G = self.ucg = self.prev = self.rkey = self.full = self._pjob = self._stopped = self._wait = None
         self._jobs, self._gp, self.sgen, self.n_a, self.rendering = {}, 0.0, 0, 0, False  # _jobs: kind -> key
         self.est_lab = {}  # "~1:50 render" next to the quality fields
@@ -460,7 +462,11 @@ class App:
                         else f"from {self.base_name}" if self.base_name else "")
         self._detect(dirty)  # during a drag: only the display
         a = dirty & session.A_KEYS
-        self._preview(submit=not a)  # stage B only: at once, also while dragging
+        if self.dragging and not a:  # a stage-B drag: B at most every 150 ms (the release brings the last)
+            if self._pjob is None:
+                self._pjob = self.root.after(150, self._preview)
+        else:
+            self._preview(submit=not a)  # stage B only: at once
         if a:  # stage A: at once for boxes, choices and Frame, else once typing pauses
             self._preview_soon(0 if a & (self.T.keys() | self.C.keys() | {"gpu", "lookahead"}) else 300)
 
@@ -872,7 +878,8 @@ class App:
             self._need_sh()
         self._show_stats()
         self._show_hist()
-        self.wv.redraw(("lanes", "gain") if self.dragging else ("ov", "ruler", "lanes", "gain"))
+        self.wv.redraw(("ov", "ruler", "lanes", "gain") if not self.dragging else
+                       ("lanes", "gain") if dirty & session.A_KEYS else ("gain",))  # stage B: the lanes change with B
 
     def _auto_jobs(self):
         """NMF auto detection: the ceilings, then the flags with the shoulder in use (light worker)."""
@@ -1365,7 +1372,7 @@ class App:
         if hit is None and not cfg["declip"]:  # stage A is only the input gain: instant
             k = keys[0]
             opt = settings_from_cfg(session.stage_cfg_a(cfg, False))
-            self.lru[k] = session.stage_a(song, opt, k[0], k[1], np, None, {}), 0.0
+            self._lru_put(k, session.stage_a(song, opt, k[0], k[1], np, None, {}), 0.0)
             hit = k, k
         if hit is not None:
             self._keep_a(keys[:keys.index(hit[1])])
@@ -1382,6 +1389,12 @@ class App:
         self.heavy.submit("A", (self.sgen, akey), self._job_a, song, cfg, akey, self._ekind(cfg, akey[3]),
                           self._sh(cfg))
         self._badge("computing 0 % · Esc", THRESH)
+
+    def _lru_put(self, key, D, secs):
+        """A stage-A result for the region previews; the 6 latest are kept."""
+        self.lru[key] = D, secs
+        while len(self.lru) > 6:
+            self.lru.popitem(last=False)
 
     def _keep_a(self, keys=()):
         """Cancel the stage-A job in flight unless it serves one of keys."""
@@ -1496,9 +1509,7 @@ class App:
         song = self.wv.song
         if kind == "A":
             akey, D, secs, ek = v
-            self.lru[akey] = D, secs
-            while len(self.lru) > 6:
-                self.lru.popitem(last=False)
+            self._lru_put(akey, D, secs)
             if ek:
                 self.est.update(ek, (akey[1] - akey[0]) / song.sr, secs)
         elif kind == "G":
@@ -1522,7 +1533,7 @@ class App:
 
     # ---- audition ----
     MON = (None, 0.0, -6.0, -12.0)  # the Mon button: Auto, then fixed trims in dB
-    LOOP_S = 30  # a longer region loops its first 30 s: whole-song buffers would stall the UI
+    LOOP_S = 300  # a longer region loops its first 5 min (buffers: about 0.1 s to build per 2 min)
 
     def toggle_play(self):
         """Space or Play: loop the region (without one, the song from the edit cursor), or stop."""
@@ -1751,8 +1762,13 @@ class App:
         finally:
             log("")
             log.close()
+            session.release_memory()
 
     def _poll(self):
+        """Every 80 ms: the workers' and the render's messages. Rescheduled first, and each message
+        handled on its own: one that fails is reported, and never stops the ones after it (a dead poll
+        loop froze every preview and render until a restart)."""
+        self.root.after(80, self._poll)
         msgs = []
         try:
             while True:
@@ -1761,17 +1777,19 @@ class App:
             pass
         render = [m for m in msgs if not m[0].startswith("job")]
         for m in msgs:
-            if m[0] == "p":
-                self.frac = m[1]
-                if m[3] is not None:
-                    self.wv.set_output(m[3], m[2])
-            elif m[0].startswith("job"):
-                self._on_job(*m)
-            else:
-                self._finished(m)
+            try:
+                if m[0] == "p":
+                    self.frac = m[1]
+                    if m[3] is not None:
+                        self.wv.set_output(m[3], m[2])
+                elif m[0].startswith("job"):
+                    self._on_job(*m)
+                else:
+                    self._finished(m)
+            except Exception:
+                self.root.report_callback_exception(*sys.exc_info())
         if render and render[-1][0] == "p":
             self._progress_text()
-        self.root.after(80, self._poll)
 
     def _progress_text(self):
         el = time.time() - self.t0
@@ -2226,6 +2244,8 @@ def _selfcheck():
         assert len(pl.bufs[1]) == r[1] - r[0]
         n_a, b, hold = app.n_a, pl.bufs, app._mon_db  # (r) while playing: new buffers, the Auto trim kept
         app.dragging = "output_gain"; app._set("output_gain", -6.0); root.update()
+        assert app._pjob is not None  # a stage-B drag: B follows within 150 ms, not on every motion
+        time.sleep(0.2); root.update()
         assert app.n_a == n_a and not wv.pv[2] and np.array_equal(wv.pv[0], ref[r[0]:r[1]] * 10 ** (-6 / 20))
         assert pl.bufs is not b and app._mon_db == hold
         app.drag_end(); settle()

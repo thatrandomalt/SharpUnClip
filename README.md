@@ -96,9 +96,9 @@ pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 **Other GPUs** need their own PyTorch build for the NMF engine (and
-Unlimit). Only CUDA has been tested here; the others run the same PyTorch code
-but are untested, so if one fails, switch *GPU* off (or drop `--gpu`) to use
-the CPU, and please report it.
+Unlimit). CUDA is tested here and ROCm by a tester (RX 9070, Linux); Intel
+and Apple run the same PyTorch code but are untested, so if one fails, switch
+*GPU* off (or drop `--gpu`) to use the CPU, and please report it.
 - **AMD:** a ROCm build of PyTorch, which shows the GPU to PyTorch as a CUDA
   device. Linux: the ROCm option on <https://pytorch.org/get-started/locally/>.
   Windows 11: AMD's PyTorch for Windows, for Radeon RX 7000/9000 and Ryzen AI
@@ -108,7 +108,11 @@ the CPU, and please report it.
   torch and torchaudio together from the same ROCm source: a later plain
   `pip install torchaudio` (or `pip install -r requirements.txt` with a newer
   torchaudio) can swap in the CPU-only torch from PyPI. Check with the command
-  in step 4: it should say `NMF on ROCm: <your GPU>`.
+  in step 4: it should say `NMF on ROCm: <your GPU>`. With a ROCm build, the
+  SPADE engine runs through PyTorch too, not OpenCL: Mesa's OpenCL loaded into
+  the same program hid the GPU from PyTorch (`--gpu opencl` still forces it).
+  Tested: PyTorch 2.13 with ROCm 7.1 on CachyOS; 2.14.1 with ROCm 7.14 would
+  not load next to Mesa's OpenCL there.
 - **Intel Arc and Core Ultra (Windows, Linux):** with a current Intel driver,
   `pip install torch torchaudio --index-url https://download.pytorch.org/whl/xpu`
 - **Apple silicon:** a plain `pip install torch torchaudio` includes the MPS
@@ -150,8 +154,8 @@ NVIDIA GeForce RTX 4070 Laptop GPU`, or `NMF on CPU`.
 
 - **NMF engine:** PyTorch's GPU (CUDA/ROCm, Intel XPU or Apple MPS), else
   the CPU.
-- **SPADE engine fallback order:** OpenCL first, then PyTorch's GPU, then CPU
-  (PyTorch if installed, else NumPy).
+- **SPADE engine fallback order:** OpenCL first (with ROCm PyTorch: PyTorch
+  first), then PyTorch's GPU, then CPU (PyTorch if installed, else NumPy).
 - **Choosing a GPU:** with two GPUs it picks the stronger one. Set
   `SHARPUNCLIP_OPENCL_DEVICE` to part of a device name (e.g. `gfx` or
   `NVIDIA`) to choose.
@@ -272,7 +276,7 @@ Playback needs `pip install sounddevice` (on Linux also `libportaudio2`).
 Without it the audition controls are greyed out with a note, and everything
 else works. Nothing plays until you press Play.
 
-- Space (or ▶) loops the region (its first 30 s when it is longer). Esc stops.
+- Space (or ▶) loops the region (its first 5 minutes when it is longer). Esc stops.
 - 1, 2 and 3 switch between the original (Orig), the preview or render (Proc)
   and their difference (Diff); X swaps Orig and Proc. Switching keeps the beat
   and never clicks. Proc changes as each new preview lands.

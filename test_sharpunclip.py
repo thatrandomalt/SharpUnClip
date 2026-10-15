@@ -850,6 +850,31 @@ def test_torch_gpu_pick():
         U.torch_gpu.cache_clear()
 
 
+def test_gpu_probe_order():
+    # ROCm (simulated): loading Mesa's OpenCL hid the GPU from PyTorch on an RX 9070. PyTorch's GPU is
+    # probed first, and auto then skips OpenCL (both engines on PyTorch); forced OpenCL keeps NMF on it.
+    try:
+        import torch
+        import sharpunclip_cl
+    except ImportError:
+        return
+    real = torch.cuda.is_available, torch.version.hip, sharpunclip_cl.device, torch.backends.cudnn.enabled
+
+    def clobber():  # what loading Rusticl did
+        torch.cuda.is_available = lambda: False
+        return object()
+    try:
+        torch.cuda.is_available, torch.version.hip, sharpunclip_cl.device = (lambda: True), "7.1", clobber
+        U.torch_gpu.cache_clear()
+        assert U.spade_backend(True) == (torch, "cuda") and torch.cuda.is_available()  # OpenCL never loaded
+        assert not torch.backends.cudnn.enabled  # MIOpen off on ROCm
+        xp, dev = U.spade_backend("opencl")
+        assert dev == "opencl" and not torch.cuda.is_available() and U._nmf_device(dev) == "cuda"
+    finally:
+        torch.cuda.is_available, torch.version.hip, sharpunclip_cl.device, torch.backends.cudnn.enabled = real
+        U.torch_gpu.cache_clear()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

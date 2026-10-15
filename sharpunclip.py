@@ -63,19 +63,26 @@ def torch_gpu():
     return None
 
 
+def _hip():
+    import torch
+    return bool(torch.version.hip)
+
+
 def spade_backend(gpu=False):
     """Return (array module, device). gpu: False/"cpu", True/"auto", "opencl" or "cuda".
     auto tries OpenCL, then PyTorch's GPU (CUDA, XPU or MPS); otherwise the CPU (PyTorch if
-    installed, else NumPy)."""
+    installed, else NumPy). With a ROCm build of PyTorch, auto skips OpenCL: Mesa's OpenCL (Rusticl)
+    loaded into the same process hid the ROCm GPU from PyTorch (seen on an RX 9070), so both engines
+    run on PyTorch there."""
     gpu = "auto" if gpu is True else gpu or "cpu"
-    if gpu in ("auto", "opencl"):
+    tg = torch_gpu() if gpu != "cpu" else None  # before any OpenCL is loaded (see above)
+    if gpu == "opencl" or gpu == "auto" and not (tg == "cuda" and _hip()):
         try:
             import sharpunclip_cl
             if sharpunclip_cl.device() is not None:
                 return sharpunclip_cl, "opencl"
         except Exception:
             pass
-    tg = torch_gpu()
     if tg and (gpu == "auto" or gpu == tg):
         import torch
         return torch, tg

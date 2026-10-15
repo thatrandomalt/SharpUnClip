@@ -5,7 +5,9 @@
 """GUI session logic without tkinter: waveform envelopes, manual-detection results, background
 workers, and region previews as two calls of the real process()."""
 import contextlib
+import ctypes
 import math
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -22,6 +24,22 @@ except Exception as e:  # ImportError, or OSError when libportaudio2 is missing 
 SD_HINT = "Playback needs: pip install sounddevice (Linux: also libportaudio2)"
 
 GPU_LOCK = threading.Lock()  # held by the heavy worker per job and by a render throughout: one GPU user
+
+
+def release_memory():
+    """Hand freed memory back after a big job: PyTorch's cached GPU blocks, and on Linux glibc's free
+    heap. Else the NMF engine's peak (large at a high Process-at-Hz rate) stays taken for good."""
+    torch = sys.modules.get("torch")
+    for m in () if torch is None else (torch.cuda, getattr(torch, "xpu", None), getattr(torch, "mps", None)):
+        try:
+            m.empty_cache()
+        except Exception:  # not built in, or not available
+            pass
+    if sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:  # not glibc
+            pass
 
 
 class Cancelled(Exception):
@@ -406,10 +424,10 @@ class Worker(threading.Thread):
     `lock` (the heavy worker's GPU_LOCK) while it runs; while paused, queued jobs wait. A long job
     lets urgent ones run inside it (run_pending)."""
 
-    def __init__(self, q, lock=None):
+    def __init__(self, q, lock=None, after=None):
         super().__init__(daemon=True)
         self.q, self.cv, self.jobs, self.stack, self.seq = q, threading.Condition(), {}, [], 0
-        self.lock, self.paused = lock or contextlib.nullcontext(), False
+        self.lock, self.paused, self.after = lock or contextlib.nullcontext(), False, after
         self.start()
 
     @property
@@ -475,6 +493,8 @@ class Worker(threading.Thread):
                 job = self._take(min(self.jobs, key=lambda k: self.jobs[k][:2]))
             with self.lock:
                 self._exec(*job)
+                if self.after:  # e.g. release_memory, still holding the lock
+                    self.after()
 
 
 class Estimates:

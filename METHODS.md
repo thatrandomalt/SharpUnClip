@@ -420,6 +420,7 @@ integrated GPU).
 |---|---|
 | `test_nmf_engine_auto` | NMF engine with its own analysis: samples below the ceiling are bit-exact, SNR improves by more than 3 dB, progress ends at 100%; on the CPU and PyTorch's GPU. |
 | `test_torch_gpu_pick` | With CUDA absent, an Intel (XPU) or Apple (MPS) GPU is picked for both engines (simulated). |
+| `test_gpu_probe_order` | ROCm (simulated): PyTorch's GPU is found before OpenCL is loaded, auto then skips OpenCL, and MIOpen is off. |
 | `test_nmf_engine_manual_detection_bounds` | NMF engine with SharpUnClip's detection: unflagged samples bit-exact, rebuilt ones keep their sign and stay within \|y\| ≤ \|x̂\| ≤ m\|y\|. |
 | `test_lsb_estimate_ignores_silent_intro` | A silent intro no longer makes 16-bit audio look like 8-bit to the NMF engine's analysis (a bug fixed in the included engine). |
 | `test_spade_progress_snapshots_are_final` | Every progress snapshot already equals the final output up to its "done" point, and reporting progress changes nothing; on every backend. |
@@ -764,12 +765,14 @@ Each idea below was measured with the same protocol and dropped.
 - **Objective scores only.** There was no formal listening test. The author's
   listening drove the investigation of the "watery" sound and the peak
   height.
-- **NMF engine GPU support is tested on NVIDIA only.** It runs on whatever GPU
-  PyTorch supports: AMD through a ROCm build (CUDA graphs and MIOpen are
-  switched off there), Intel through XPU, Apple through MPS. Those paths run
-  the same code but are untested here; only the device choice is tested, by
-  simulation. A first ROCm test failed, with no error captured (logs were only
-  written after a successful run then; they are now written as the run goes).
+- **NMF engine GPU support is tested on NVIDIA here, and on AMD by a tester.**
+  It runs on whatever GPU PyTorch supports: AMD through a ROCm build (CUDA
+  graphs and MIOpen are switched off there), Intel through XPU, Apple through
+  MPS. A tester's RX 9070 (Linux, PyTorch 2.13 with ROCm 7.1) rendered on
+  ROCm once the GPU was asked for before OpenCL: loading Mesa's OpenCL
+  (Rusticl) into the process made PyTorch report no GPU, so with a ROCm build
+  the SPADE engine now runs through PyTorch as well. Intel and Apple are
+  untested; their device choice is tested by simulation.
   GPUs PyTorch doesn't support (e.g. Radeons older than RX 7000 on Windows)
   run the NMF engine on the CPU. The SPADE engine runs on any GPU vendor
   through OpenCL.

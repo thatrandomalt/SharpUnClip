@@ -110,6 +110,44 @@ def cases(x, sr):
             "compressed": (_compress(x, sr, *COMP), x, sisdr, "SI-SDR")}
 
 
+def cpu_names():
+    """The CPU model of each physical CPU (socket), e.g. two names on a dual-Xeon server."""
+    import subprocess
+    names = []
+    try:
+        if sys.platform.startswith("linux"):
+            names = _linux_cpus(open("/proc/cpuinfo", encoding="utf-8", errors="replace").read())
+        elif sys.platform == "darwin":
+            names = [subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True,
+                                    timeout=20).stdout.strip()]
+        elif sys.platform == "win32":
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor).Name"],
+                               capture_output=True, text=True, timeout=30)
+            names = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    except Exception:  # unreadable: the generic name below
+        pass
+    return [n for n in names if n] or [platform.processor() or platform.machine()]
+
+
+def _linux_cpus(text):
+    """Model names per socket ("physical id") from /proc/cpuinfo's per-thread blocks."""
+    sockets = {}
+    for block in text.split("\n\n"):
+        f = {k.strip(): v.strip() for k, _, v in (ln.partition(":") for ln in block.splitlines())}
+        if f.get("model name"):
+            sockets[f.get("physical id", "0")] = f["model name"]
+    return list(sockets.values())
+
+
+def cpu_text(threads):
+    """e.g. "2 x Intel(R) Xeon(R) Gold 6248 CPU @ 2.50GHz, 80 threads (using 80)"."""
+    count = {}
+    for n in cpu_names():
+        count[n] = count.get(n, 0) + 1
+    desc = " + ".join(f"{c} x {n}" if c > 1 else n for n, c in count.items())
+    return f"{desc}, {os.cpu_count()} threads (using {threads})"
+
+
 def uses_gpu(s):
     return s["declip"] or s["unlimit"]  # uncompress always runs on the CPU
 
@@ -162,7 +200,8 @@ def main():
         sys.exit("no GPU found (see README: Install)")
     print(f"song {os.path.relpath(SONG, HERE)} ({song_id}), {len(x) / sr:.1f} s, {mode}")
     print(U.env_info())
-    print(f"CPU: {platform.processor() or platform.machine()}, {threads} threads")
+    cpu = cpu_text(threads)
+    print(f"CPU: {cpu}")
     for name, xp, dev in devs:
         if name == "GPU":
             print(f"GPU: {U.backend_name(xp, dev, U.DEFAULTS)} | SPADE: {U.backend_name(xp, dev)}")
@@ -199,7 +238,7 @@ def main():
             shown = " " * 40  # the case and algorithm once
 
     if a.json:
-        json.dump(dict(song=song_id, mode=mode, env=U.env_info(), cpu=platform.processor() or platform.machine(),
+        json.dump(dict(song=song_id, mode=mode, env=U.env_info(), cpu=cpu,
                        threads=threads, results=rows), open(a.json, "w", encoding="utf-8"), indent=1)
     if a.save_reference:
         r = json.load(open(REF, encoding="utf-8")) if os.path.exists(REF) else {}

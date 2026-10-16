@@ -9,6 +9,7 @@ A Conv-TasNet-style network (Luo & Mesgarani 2019) that predicts one gain per sa
 shared by all channels. The layers mirror Asteroid's (Pariente et al. 2020, MIT) so the
 published weights load without that dependency. Needs PyTorch.
 """
+import math
 import os
 import numpy as np
 import torch
@@ -82,12 +83,43 @@ class DeLimiter(nn.Module):
 _model = {}
 
 
+# SPDX-SnippetBegin
+# SPDX-SnippetCopyrightText: 2017 Facebook Inc. (Soumith Chintala)
+# SPDX-License-Identifier: BSD-2-Clause
+def resample(w, orig_freq, new_freq, lowpass_filter_width=6, rolloff=0.99):
+    """w (..., n) from orig_freq to new_freq Hz: torchaudio.functional.resample with its defaults
+    (Hann-windowed sinc), the same operations in the same order, so Unlimit needs no torchaudio, whose
+    builds must match PyTorch's exactly (a mismatched one would not load next to AMD's ROCm PyTorch)."""
+    gcd = math.gcd(int(orig_freq), int(new_freq))
+    orig_freq, new_freq = int(orig_freq) // gcd, int(new_freq) // gcd
+    if orig_freq == new_freq:
+        return w
+    base_freq = min(orig_freq, new_freq) * rolloff
+    width = math.ceil(lowpass_filter_width * orig_freq / base_freq)
+    kw = dict(dtype=w.dtype, device=w.device)
+    idx = torch.arange(-width, width + orig_freq, **kw)[None, None] / orig_freq
+    t = torch.arange(0, -new_freq, -1, **kw)[:, None, None] / new_freq + idx
+    t *= base_freq
+    t = t.clamp_(-lowpass_filter_width, lowpass_filter_width)
+    window = torch.cos(t * math.pi / lowpass_filter_width / 2) ** 2
+    t *= math.pi
+    kernel = torch.where(t == 0, torch.tensor(1.0).to(t), t.sin() / t)
+    kernel *= window * (base_freq / orig_freq)
+    shape = w.size()
+    w = w.reshape(-1, shape[-1])
+    n_wav, length = w.shape
+    out = F.conv1d(F.pad(w, (width, width + orig_freq))[:, None], kernel, stride=orig_freq)
+    out = out.transpose(1, 2).reshape(n_wav, -1)
+    out = out[..., :int(torch.ceil(torch.as_tensor(new_freq * length / orig_freq)))]
+    return out.view(shape[:-1] + out.shape[-1:])
+# SPDX-SnippetEnd
+
+
 @torch.no_grad()
 def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0, dev=None):
     """Per-sample gain of the model over its median for x (n, ch): the 100 % unlimit gain.
     The model runs at 44.1 kHz on crossfaded chunks; only the gain curve is resampled to sr.
     dev: the torch device; None = PyTorch's GPU if there is one, else the CPU."""
-    import torchaudio.functional as AF
     dev = dev or ("cuda" if torch.cuda.is_available() else "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available()
                   else "mps" if torch.backends.mps.is_available() else "cpu")
     if torch.version.hip:  # ROCm: skip MIOpen's first-use tuning of every conv shape (as sharpunclip.torch_gpu)
@@ -100,7 +132,7 @@ def raw_gain(x, sr, tick=None, seg=6.0, fade=1.0, dev=None):
     st = x if x.shape[1] == 2 else np.repeat(x[:, :1], 2, 1)  # mono -> both inputs
     w = torch.from_numpy(np.ascontiguousarray(st.T, np.float32)).to(dev)
     if sr != 44100:
-        w = AF.resample(w, sr, 44100)
+        w = resample(w, sr, 44100)
     T = w.shape[-1]; S, H = int(seg * 44100), int((seg - fade) * 44100); Fd = S - H
     g = torch.zeros(T, device=dev); ws = torch.zeros(T, device=dev)
     ramp = torch.linspace(0, 1, Fd + 2, device=dev)[1:-1]

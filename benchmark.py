@@ -207,7 +207,10 @@ def main():
             print(f"GPU: {U.backend_name(xp, dev, U.DEFAULTS)} | SPADE: {U.backend_name(xp, dev)}")
     for name, xp, dev in devs:  # warm-up, untimed: GPU kernels compile, models load
         for s in (P["Accurate"], P["Accurate SPADE"], RUNS[7][2]):
-            U.process(x[:2 * sr], sr, s, xp=xp, dev=dev)
+            try:
+                U.process(x[:2 * sr], sr, s, xp=xp, dev=dev)
+            except Exception:  # its rows report it
+                pass
 
     C, rows, out = cases(x, sr), [], {}
     print(f"\n{'case':<11}{'algorithm':<29}{'device':<7}{'time':>8}{'x song':>8}{'score':>14}{'vs ref':>8}"
@@ -221,7 +224,13 @@ def main():
             if dname == "GPU" and not uses_gpu(s):
                 continue
             t0 = time.perf_counter()
-            o = U.process(y, sr, s, xp=xp, dev=dev)
+            try:
+                o = U.process(y, sr, s, xp=xp, dev=dev)
+            except Exception as e:  # one broken algorithm (e.g. a mismatched torchaudio) never stops the rest
+                print(f"{shown}{dname:<7}failed: {type(e).__name__}: {str(e).splitlines()[0][:80]}", flush=True)
+                rows.append(dict(case=case, algorithm=name, device=dname, error=f"{type(e).__name__}: {e}"))
+                shown = " " * 40
+                continue
             dt = time.perf_counter() - t0
             gain = min(score(truth, o), 100.0) - base
             same = snr(out[key], o) if key in out else None
@@ -244,7 +253,7 @@ def main():
         r = json.load(open(REF, encoding="utf-8")) if os.path.exists(REF) else {}
         if r.get("song") != song_id:
             r = {"song": song_id}
-        cpu = {f"{w['case']}/{w['algorithm']}": w["score_db"] for w in rows if w["device"] == "CPU"}
+        cpu = {f"{w['case']}/{w['algorithm']}": w["score_db"] for w in rows if w["device"] == "CPU" and "score_db" in w}
         if not cpu:
             sys.exit("the reference holds CPU scores: run without --gpu")
         r[mode] = cpu

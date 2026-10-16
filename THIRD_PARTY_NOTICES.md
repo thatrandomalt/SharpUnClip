@@ -16,6 +16,7 @@ them. The project follows the [REUSE](https://reuse.software) specification.
 |---|---|---|---|
 | Pretrained De-limiter model weights, redistributed unchanged from <https://github.com/jeonchangbin49/De-limiter> (file `weight/all.pth`, commit `e15f80b`) | `weights/delimiter.pth` (see `weights/delimiter.pth.license`) | MIT | © 2023 jeonchangbin49 |
 | Network structure (layer layout and names) of Asteroid's TDConvNet masker and asteroid-filterbanks' free filterbank, mirrored so the weights load | `unlimit.py` | MIT | © 2019 Pariente Manuel |
+| torchaudio's resampling (`torchaudio.functional.resample` with its defaults: the Hann-windowed sinc kernel and its application), followed operation for operation so Unlimit needs no torchaudio | `unlimit.py`, function `resample` (an SPDX snippet) | BSD-2-Clause | © 2017 Facebook Inc. (Soumith Chintala) |
 | BetterDeclipper's restoration engine (the NMF Declip engine), from <https://github.com/Qupci/BetterDeclipper> v0.3.0, commit `f9ff7f4`: the modules the engine needs, without its CLI. Changed: a progress callback inside its SPADE stage (`methods/spade.py`, `engine.py`), the quantization-step estimator now samples the whole file and skips exact zeros so a silent intro no longer looks like 8-bit audio (`detect.py`), CUDA graphs are off on ROCm builds of PyTorch (`methods/pnp.py`), its SPADE stage sizes its batches and picks its top-k method on any PyTorch GPU, not only CUDA (`methods/spade.py`), CUDA graphs are captured on the solve's own GPU, which need not be the current one (`methods/pnp.py`), `declip(device=[...])` shares the PnP/NMF chunks between several devices, without CUDA graphs (`engine.py`, `methods/pnp.py`), the analysis pass and the lambda reference are split out of `declip()` as `fast_pass()` and `lam_refs_for()` (which also accepts a non-integer sample rate), with `declip(lam_refs=)` to reuse a file-global reference (`engine.py`), and the package docstring (`__init__.py`) | `betterdeclipper/` | MIT | © 2026 Qupci |
 
 The original license texts follow, exactly as published.
@@ -100,6 +101,36 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### torchaudio (<https://github.com/pytorch/audio>)
+
+```
+BSD 2-Clause License
+
+Copyright (c) 2017 Facebook Inc. (Soumith Chintala), 
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ## Papers
 
 SharpUnClip implements methods described in the papers below, from the
@@ -126,6 +157,6 @@ before using the Unlimit stage commercially.
 
 ## Dependencies
 
-NumPy, SciPy, soundfile/libsndfile, PyTorch, torchaudio, PyOpenCL and sounddevice
+NumPy, SciPy, soundfile/libsndfile, PyTorch, PyOpenCL and sounddevice
 (with PortAudio) are installed separately by the user (see the README) and are
 not redistributed here; each is under its own license. Tkinter ships with Python.

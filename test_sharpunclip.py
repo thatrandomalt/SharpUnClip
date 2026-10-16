@@ -875,6 +875,19 @@ def test_gpu_probe_order():
         U.torch_gpu.cache_clear()
 
 
+def test_resample_matches_torchaudio():
+    # Unlimit's resampler (no torchaudio needed) is torchaudio's default resample, bit for bit.
+    try:
+        import torch
+        import torchaudio.functional as AF
+        import unlimit
+    except Exception:  # no torchaudio here (or none that loads): nothing to compare with
+        return
+    w = torch.from_numpy(np.random.default_rng(0).standard_normal((2, 9000)).astype(np.float32))
+    for sr in (48000, 22050, 96000, 32000, 44100, 16000):
+        assert torch.equal(unlimit.resample(w, sr, 44100), AF.resample(w, sr, 44100)), sr
+
+
 def test_nmf_multi_device():
     # --gpus: the NMF engine's chunks shared between devices (here one device twice: two threads) give
     # the one-device result, in order; and the CLI accepts and logs it.

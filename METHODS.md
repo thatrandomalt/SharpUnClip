@@ -242,7 +242,7 @@ license.
    `weights/delimiter.pth`) load unchanged. Checked against the original asteroid-based model on random
    stereo input: maximum gain difference 6 × 10⁻⁸.
 2. **Gain applied at the file's own sample rate.** The network still runs at
-   44.1 kHz (input resampled with `torchaudio`). Only the predicted gain
+   44.1 kHz (input resampled with torchaudio's method, built in: no torchaudio needed). Only the predicted gain
    curve, which is smooth, is interpolated back to the file's rate and
    applied to the original-rate audio. The audio itself is never resampled.
 3. **Body level kept, Amount in dB.** The paper's output is the input times a
@@ -660,6 +660,17 @@ progress update rebuilt the whole song; they now only finalize the new part
 laptop in its power-saving state was about 2× slower on the GPU (SPADE:
 166–182 s).
 
+**`benchmark.py` on other hardware** (16 s song, seconds; every score within 0.01 dB of the
+reference). The NMF rows run on one GPU even with several, as the song is one chunk:
+
+| Algorithm | Ryzen 9 7945HX, 12 threads | RTX 4070 laptop | 8 × V100 (`--gpus all`) | M4 Pro |
+|---|---|---|---|---|
+| Accurate (NMF normal) | 14.1 | 3.3 | 3.0 | 5.3 |
+| NMF fast | 5.8 | 1.5 | 1.7 | 1.8 |
+| Accurate SPADE | 17.6 | 1.8 | 0.6 | 1.9 |
+| Unmaster | 9.7 | 2.1 | 1.6 | 3.6 |
+| Unmaster SPADE | 9.2 | 1.1 | 0.5 | 1.1 |
+
 ### 6.6 Third song, one stage at a time (dhdpmtws)
 
 Changes vs the degraded file, in dB (section 5.1 describes the versions).
@@ -773,14 +784,16 @@ Each idea below was measured with the same protocol and dropped.
 - **Objective scores only.** There was no formal listening test. The author's
   listening drove the investigation of the "watery" sound and the peak
   height.
-- **NMF engine GPU support is tested on NVIDIA here, and on AMD by a tester.**
+- **NMF engine GPU support is tested on NVIDIA, AMD (by a tester) and Apple.**
   It runs on whatever GPU PyTorch supports: AMD through a ROCm build (CUDA
   graphs and MIOpen are switched off there), Intel through XPU, Apple through
   MPS. A tester's RX 9070 (Linux, PyTorch 2.13 with ROCm 7.1) rendered on
   ROCm once the GPU was asked for before OpenCL: loading Mesa's OpenCL
   (Rusticl) into the process made PyTorch report no GPU, so with a ROCm build
-  the SPADE engine now runs through PyTorch as well. Intel and Apple are
-  untested; their device choice is tested by simulation.
+  the SPADE engine now runs through PyTorch as well. An M4 Pro (MPS, and
+  Apple's OpenCL for SPADE) matched the reference scores of `benchmark.py`
+  within 0.01 dB. Intel is untested; its device choice is tested by
+  simulation.
   GPUs PyTorch doesn't support (e.g. Radeons older than RX 7000 on Windows)
   run the NMF engine on the CPU. The SPADE engine runs on any GPU vendor
   through OpenCL.
@@ -861,7 +874,7 @@ SharpUnClip was developed with heavy AI assistance:
 - J. W. Cooley, J. W. Tukey, "An algorithm for the machine calculation of complex Fourier series," *Mathematics of Computation*, 1965 (the GPU kernel's FFT).
 
 **Software:** NumPy, SciPy (NMF engine's analysis and band split),
-soundfile/libsndfile (audio I/O), PyTorch and torchaudio (NMF engine,
+soundfile/libsndfile (audio I/O), PyTorch (NMF engine,
 Unlimit, GPU/CPU backend, resampling), PyOpenCL (SPADE GPU backend), Tkinter
 (GUI). Asteroid and asteroid-filterbanks were used during development only, to
 check the De-limiter rebuild.

@@ -88,7 +88,7 @@ Activate the environment:
 ### 2. Install the dependencies
 
 ```
-pip install numpy scipy soundfile torch torchaudio   # required (NMF engine, Unlimit)
+pip install numpy scipy soundfile torch   # required (torch: NMF engine, Unlimit)
 pip install pyopencl                                 # optional: SPADE engine on any GPU vendor
 ```
 
@@ -97,30 +97,30 @@ For the NMF engine on an NVIDIA GPU, install the CUDA build with the command
 for your system from <https://pytorch.org/get-started/locally/>, for example:
 
 ```
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
 **Other GPUs** need their own PyTorch build for the NMF engine (and
-Unlimit). CUDA is tested here and ROCm by a tester (RX 9070, Linux); Intel
-and Apple run the same PyTorch code but are untested, so if one fails, switch
-*GPU* off (or drop `--gpu`) to use the CPU, and please report it.
+Unlimit). Tested: CUDA (RTX 4070, V100), ROCm (RX 9070, Linux) and Apple
+silicon (M4 Pro, MPS). Intel runs the same PyTorch code but is untested, so if
+it fails, switch *GPU* off (or drop `--gpu`) to use the CPU, and please report
+it.
 - **AMD:** a ROCm build of PyTorch, which shows the GPU to PyTorch as a CUDA
   device. Linux: the ROCm option on <https://pytorch.org/get-started/locally/>.
   Windows 11: AMD's PyTorch for Windows, for Radeon RX 7000/9000 and Ryzen AI
   300 / AI Max (Python 3.12); follow
   [AMD's guide](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html).
-  Older Radeons and most integrated ones aren't supported by ROCm. Install
-  torch and torchaudio together from the same ROCm source: a later plain
-  `pip install torchaudio` (or `pip install -r requirements.txt` with a newer
-  torchaudio) can swap in the CPU-only torch from PyPI. Check with the command
-  in step 4: it should say `NMF on ROCm: <your GPU>`. With a ROCm build, the
+  Older Radeons and most integrated ones aren't supported by ROCm. Don't run
+  a plain `pip install torch` (or `-r requirements.txt`) afterwards: it can
+  swap in PyPI's torch. Check with the command in step 4: it should say
+  `NMF on ROCm: <your GPU>`. With a ROCm build, the
   SPADE engine runs through PyTorch too, not OpenCL: Mesa's OpenCL loaded into
   the same program hid the GPU from PyTorch (`--gpu opencl` still forces it).
   Tested: PyTorch 2.13 with ROCm 7.1 on CachyOS; 2.14.1 with ROCm 7.14 would
   not load next to Mesa's OpenCL there.
 - **Intel Arc and Core Ultra (Windows, Linux):** with a current Intel driver,
-  `pip install torch torchaudio --index-url https://download.pytorch.org/whl/xpu`
-- **Apple silicon:** a plain `pip install torch torchaudio` includes the MPS
+  `pip install torch --index-url https://download.pytorch.org/whl/xpu`
+- **Apple silicon:** a plain `pip install torch` includes the MPS
   backend. Operations MPS lacks run on the CPU automatically.
 
 GPUs none of these cover can still run the **Accurate SPADE** and **Unmaster
@@ -142,9 +142,9 @@ is enough; no CUDA or ROCm install is needed.
   `nvidia-opencl-icd` with the NVIDIA driver, Mesa's `mesa-opencl-icd`
   (Rusticl) or ROCm for AMD, `intel-opencl-icd` for Intel. Names vary by
   distribution.
-- **macOS:** Apple's OpenCL is deprecated and untested here. Without
-  pyopencl, the SPADE engine uses PyTorch's MPS backend instead (also
-  untested).
+- **macOS:** Apple's OpenCL is deprecated, but ran the SPADE engine correctly
+  on an M4 Pro. Without pyopencl, the SPADE engine uses PyTorch's MPS backend
+  instead (untested).
 
 ### 4. Check it works
 
@@ -696,7 +696,7 @@ unreleased music, and too large for GitHub.
 
 How each one was used and modified: [METHODS.md](METHODS.md#10-references).
 
-**Built with** NumPy, SciPy, soundfile/libsndfile, PyTorch + torchaudio,
+**Built with** NumPy, SciPy, soundfile/libsndfile, PyTorch,
 PyOpenCL and Tkinter. iZotope Ozone's Unlimiter appears only as a comparison; iZotope and
 Ozone are trademarks of their owner, and this project is not affiliated with
 them.

@@ -1,0 +1,21 @@
+{
+ "song": "4a75f9fbdbb3",
+ "full": {
+  "clipped/Accurate (NMF normal)": 4.64,
+  "clipped/NMF fast": 3.588,
+  "clipped/NMF normal+spade": 5.046,
+  "clipped/Accurate SPADE": 3.651,
+  "clipped/SharpUnClip": -3.477,
+  "limited/Unmaster": -0.133,
+  "limited/Unmaster SPADE": -0.134,
+  "limited/Unlimit only (50 %)": -0.003,
+  "compressed/Uncompress preset": 0.15,
+  "compressed/Uncompress, known settings": 86.665
+ },
+ "quick": {
+  "clipped/Accurate (NMF normal)": 4.706,
+  "clipped/Accurate SPADE": 3.494,
+  "limited/Unmaster": -0.132,
+  "compressed/Uncompress, known settings": 86.723
+ }
+}

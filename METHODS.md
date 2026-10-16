@@ -253,7 +253,8 @@ license.
    Unmaster preset uses 15%, because its declip stage already undoes part of
    the limiting (section 6.3).
 4. **Chunked inference.** 6-second chunks are crossfaded over 1 second, so any
-   song length fits in memory.
+   song length fits in memory. It runs on PyTorch's GPU when *GPU* is on,
+   else on the CPU (before, it took the GPU whenever there was one).
 5. **Pipeline placement.** The gain is predicted from the input (before
    declipping) and applied to the input, and the declip stage's correction is
    added unscaled: out = y·g + (x̂ − y). Multiplying the declipped signal
@@ -420,6 +421,9 @@ integrated GPU).
 |---|---|
 | `test_nmf_engine_auto` | NMF engine with its own analysis: samples below the ceiling are bit-exact, SNR improves by more than 3 dB, progress ends at 100%; on the CPU and PyTorch's GPU. |
 | `test_torch_gpu_pick` | With CUDA absent, an Intel (XPU) or Apple (MPS) GPU is picked for both engines (simulated). |
+| `test_nmf_multi_device` | `--gpus`: the NMF engine's chunks shared between devices (one device twice, on the CPU and the GPU) give exactly the one-device result; the CLI logs it. |
+| `test_spade_multi_device` | `--gpus`: SPADE's batches shared between devices (one device twice) give exactly the one-device result, with progress in order; on every backend. |
+| `test_gpu_choice` | One GPU for every engine by name: PyTorch's index (simulated: two identical cards, "#2"), and each real OpenCL GPU by its listed name. |
 | `test_gpu_probe_order` | ROCm (simulated): PyTorch's GPU is found before OpenCL is loaded, auto then skips OpenCL, and MIOpen is off. |
 | `test_nmf_engine_manual_detection_bounds` | NMF engine with SharpUnClip's detection: unflagged samples bit-exact, rebuilt ones keep their sign and stay within \|y\| ≤ \|x̂\| ≤ m\|y\|. |
 | `test_lsb_estimate_ignores_silent_intro` | A silent intro no longer makes 16-bit audio look like 8-bit to the NMF engine's analysis (a bug fixed in the included engine). |
@@ -440,6 +444,10 @@ integrated GPU).
 | `test_uncompress_warmup` | An uncompress preview that starts before the region is within 0.001 dB of the render there (ratios 2 and 10); the lead-in is capped at 10 s. |
 | `test_nmf_preview_close` | A render reusing the GUI's NMF analysis equals the CLI's; an NMF region preview is within 30 dB SNR of the render. |
 | `test_cli_*` | End to end: presets, `.json` presets, logging (also of a failed run, with its traceback), stereo float output, uncompress flags. |
+
+`python benchmark.py` times every preset's algorithms on the CPU and the GPU on
+a committed, synthesized 16 s song (`bench/song.flac`) with known original,
+and compares their scores with `bench/reference.json` (see the README).
 
 `python gui.py --selfcheck` drives the real window's input fields with every
 preset and checks they reach the engine unchanged. It also checks the GUI's

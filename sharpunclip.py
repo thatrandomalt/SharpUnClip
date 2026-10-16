@@ -49,22 +49,107 @@ def mask_min_run(mask, min_run):
     return np.cumsum(edges[:-1], dtype=np.int8) > 0
 
 
+def gpu_name():
+    """The chosen GPU (part of its name, for every engine), or "" for automatic."""
+    return os.environ.get("SHARPUNCLIP_OPENCL_DEVICE", "")  # the variable the OpenCL backend reads
+
+
+def set_gpu(name):
+    """Choose the GPU every engine uses by part of its name ("" = automatic: OpenCL the one with the
+    most compute units, PyTorch its first); "NAME #2" = the second GPU of that name."""
+    if name:
+        os.environ["SHARPUNCLIP_OPENCL_DEVICE"] = name
+    else:
+        os.environ.pop("SHARPUNCLIP_OPENCL_DEVICE", None)
+    torch_gpu.cache_clear()
+
+
+_GPUS = [1]  # set_gpus
+
+
+def set_gpus(n):
+    """How many GPUs the NMF engine shares its chunks between: 1 (default), N, or 0 = all (of the chosen
+    GPU's kind and name, see set_gpu)."""
+    _GPUS[0] = max(0, int(n))
+
+
+def _nmf_devices(dev):
+    """_nmf_device, or a list of PyTorch GPUs when set_gpus asked for several and there are several."""
+    d = _nmf_device(dev)
+    if d in ("cpu", "mps") or _GPUS[0] == 1:
+        return d
+    import torch
+    kind = d.split(":")[0]
+    mod = getattr(torch, kind)
+    want = gpu_name().lower().partition("#")[0].strip()
+    found = [f"{kind}:{i}" for i in range(mod.device_count()) if want in mod.get_device_name(i).lower()]
+    found = found[:_GPUS[0]] if _GPUS[0] else found
+    return found if len(found) > 1 else d
+
+
+def is_gpu(dev):
+    """dev is a GPU device: "opencl", or a PyTorch GPU ("cuda", "cuda:1", "xpu", "mps", ...)."""
+    return dev is not None and dev.split(":")[0] in GPU_DEVS
+
+
 @functools.lru_cache(None)
 def torch_gpu():
-    """PyTorch's GPU, or None: "cuda" (NVIDIA, or AMD with a ROCm build), "xpu" (Intel), "mps" (Apple)."""
+    """PyTorch's GPU, or None: "cuda" (NVIDIA, or AMD with a ROCm build), "xpu" (Intel), "mps" (Apple);
+    "cuda:1" etc. for the chosen GPU (gpu_name()) when it is not the first. None when a GPU was chosen
+    that PyTorch does not have."""
     try:
         import torch
     except Exception:
         return None
-    if torch.cuda.is_available():
-        if torch.version.hip:  # ROCm: MIOpen tunes each new conv shape on first use (minutes, looks hung);
-            torch.backends.cudnn.enabled = False  # PyTorch's own GPU conv is fine for these small kernels
-        return "cuda"
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        return "xpu"
-    if torch.backends.mps.is_available():
+    want, _, nth = gpu_name().lower().partition("#")  # "NAME #2": the second GPU of that name
+    want, k = want.strip(), int(nth) - 1 if nth.strip().isdigit() else 0
+    for kind, mod in (("cuda", torch.cuda), ("xpu", getattr(torch, "xpu", None))):
+        if mod is None or not mod.is_available():
+            continue
+        if kind == "cuda" and torch.version.hip:  # ROCm: MIOpen tunes each new conv shape on first use
+            torch.backends.cudnn.enabled = False  # (minutes, looks hung); PyTorch's own GPU conv is fine
+        if not want and not k:
+            return kind  # the first, without starting the GPU to read names
+        hits = [i for i in range(mod.device_count()) if want in mod.get_device_name(i).lower()]
+        if 0 <= k < len(hits):
+            return f"{kind}:{hits[k]}" if hits[k] else kind
+    if torch.backends.mps.is_available() and want in "apple mps" and not k:
         return "mps"
     return None
+
+
+def list_gpus():
+    """The GPUs found, by name: PyTorch's, then OpenCL's (each once). On ROCm builds OpenCL is not
+    loaded (see spade_backend)."""
+    names = []
+    torch_gpu()  # PyTorch first: OpenCL loaded first can hide a ROCm GPU from it
+    try:
+        import torch
+        for mod in (torch.cuda, getattr(torch, "xpu", None)):
+            if mod is not None and mod.is_available():
+                names += _numbered([mod.get_device_name(i) for i in range(mod.device_count())])
+        if torch.backends.mps.is_available():
+            names.append("Apple MPS")
+        hip = bool(torch.version.hip)
+    except Exception:
+        hip = False
+    if not hip:
+        try:
+            import sharpunclip_cl
+            names += _numbered([sharpunclip_cl.label(d) for d in sharpunclip_cl.gpus()])
+        except Exception:
+            pass
+    return list(dict.fromkeys(names))
+
+
+def _numbered(names):
+    """Identical names told apart as set_gpu reads them: "X", "X #2", ..."""
+    seen, out = {}, []
+    for n in names:
+        n = n.strip()
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n} #{seen[n]}")
+    return out
 
 
 def _hip():
@@ -80,14 +165,14 @@ def spade_backend(gpu=False):
     run on PyTorch there."""
     gpu = "auto" if gpu is True else gpu or "cpu"
     tg = torch_gpu() if gpu != "cpu" else None  # before any OpenCL is loaded (see above)
-    if gpu == "opencl" or gpu == "auto" and not (tg == "cuda" and _hip()):
+    if gpu == "opencl" or gpu == "auto" and not (tg and tg.startswith("cuda") and _hip()):
         try:
             import sharpunclip_cl
             if sharpunclip_cl.device() is not None:
                 return sharpunclip_cl, "opencl"
         except Exception:
             pass
-    if tg and (gpu == "auto" or gpu == tg):
+    if tg and (gpu == "auto" or gpu == tg.split(":")[0]):
         import torch
         return torch, tg
     try:
@@ -104,33 +189,38 @@ def backend_name(xp, dev, opt=None):
             import torch
         except Exception:
             return "NMF engine needs PyTorch"
-        d = _nmf_device(dev)
+        d = _nmf_devices(dev)
+        if isinstance(d, list):
+            return f"NMF on {len(d)} GPUs: " + _torch_gpu_name(d[0])
         if d != "cpu":
             return "NMF on " + _torch_gpu_name(d)
-        if dev in GPU_DEVS:  # a GPU was found (OpenCL), but this PyTorch build can't use it
-            return f"NMF on CPU (PyTorch {torch.__version__} has no GPU support for this GPU; see README)"
+        if is_gpu(dev):  # a GPU was found (OpenCL), but PyTorch can't use it
+            return ("NMF on CPU (PyTorch has no " + (f"GPU named {gpu_name()!r}" if gpu_name() else "GPU")
+                    + f": PyTorch {torch.__version__}; see README)")
         return "NMF on CPU"
     if dev == "opencl":
-        return "OpenCL: " + xp.device().name.strip()
-    if dev in ("cuda", "xpu", "mps"):
+        many = _spade_devices(xp, dev)
+        return (f"OpenCL on {len(many)} GPUs: " + xp.label(many[0])) if many else "OpenCL: " + xp.label(xp.device())
+    if is_gpu(dev):
         return _torch_gpu_name(dev)
     return "CPU"
 
 
 def _torch_gpu_name(dev):
     import torch
-    kind = {"cuda": "ROCm" if torch.version.hip else "CUDA", "xpu": "Intel XPU", "mps": "Apple MPS"}[dev]
-    if dev == "mps":
+    t = dev.split(":")[0]
+    kind = {"cuda": "ROCm" if torch.version.hip else "CUDA", "xpu": "Intel XPU", "mps": "Apple MPS"}[t]
+    if t == "mps":
         return kind
     try:
-        return f"{kind}: " + getattr(torch, dev).get_device_name()
+        return f"{kind}: " + getattr(torch, t).get_device_name(dev)
     except Exception:  # a name is never worth failing a render for
         return kind
 
 
 def _nmf_device(dev):
     """The NMF engine runs on PyTorch: its GPU when a GPU was asked for and one is there."""
-    return (torch_gpu() or "cpu") if dev in GPU_DEVS else "cpu"
+    return (torch_gpu() or "cpu") if is_gpu(dev) else "cpu"
 
 
 def _nmf_analysis(opt, y, sr, an=None):
@@ -187,7 +277,8 @@ def _declip_nmf_spade(y, sr, opt, cap, dev, xp, progress, h):
     ests = []
     for i, kind in enumerate(("nmf", "spade")):
         p = part(i)
-        ests.append(E.declip(y, sr, models=[(kind, 93, {})], constraints=cons, device=device, verbose=False,
+        ests.append(E.declip(y, sr, models=[(kind, 93, {})], constraints=cons, device=_nmf_devices(dev),
+                             verbose=False,
                              progress=p and (lambda s, n, _t, p=p: p(s / n)), lam_refs=h.get("lam_refs"))[0])
     lo, hi = y.copy(), y.copy()
     lo[m_hi], hi[m_hi] = TH[m_hi], np.maximum(2.5 * y[m_hi], TH[m_hi])
@@ -224,7 +315,7 @@ def declip_nmf(y, sr, opt, cap=np.inf, dev=None, progress=None, hints=None, xp=n
     h = {} if hints is None else hints
     if opt["nmf_quality"] == "normal+spade":
         return _declip_nmf_spade(y, sr, opt, cap, dev, xp, progress, h)
-    kw = dict(preset=opt["nmf_quality"], device=_nmf_device(dev), verbose=False,
+    kw = dict(preset=opt["nmf_quality"], device=_nmf_devices(dev), verbose=False,
               progress=progress and (lambda i, n, _t: progress(i / n)), lam_refs=h.get("lam_refs"))
     if opt["auto_detect"]:
         kw["max_gain_db"] = 20 * math.log10(cap) if np.isfinite(cap) else None
@@ -249,7 +340,9 @@ def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
     group > 1 solves that many channels per frame with one shared set of DFT bins.
     The output (and every progress snapshot) is divided by `unscale`.
     frame0: index of y's first frame in a longer signal; batches split where that signal's
-    do, so an excerpt starting on the frame grid gives that signal's samples bit-exactly."""
+    do, so an excerpt starting on the frame grid gives that signal's samples bit-exactly.
+    With set_gpus asking for several GPUs, the batches are shared between them (_spade_devices);
+    the result is the same, built and reported in order."""
     n, ch = y.shape; a = w // ov; pad = w
     L = n + 2 * pad; L += (-L) % a
     P = lambda v: np.pad(v, ((pad, L - n - pad), (0, 0)))
@@ -271,9 +364,11 @@ def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
 
     cuts = np.r_[0, np.arange((-frame0) % batch or batch, len(starts), batch), len(starts)]
     nb = len(cuts) - 1
-    for bi in range(nb):
+    devs = _spade_devices(xp, dev)
+
+    def solve(bi, d):  # one batch's frames on device d (an OpenCL device, or a PyTorch one)
         s = starts[cuts[bi]:cuts[bi + 1]]; B = len(s)
-        seg = s[:, None] - s[0] + np.arange(w); m = s[-1] - s[0] + w
+        seg = s[:, None] - s[0] + np.arange(w)
 
         def rows(v):
             return v[s[0] + seg].transpose(0, 2, 1).reshape(B * ch, w)
@@ -282,8 +377,13 @@ def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
         if group > 1 and act.size:  # keep each frame's channels together
             act = (np.unique(act // group)[:, None] * group + np.arange(group)).ravel()
         if act.size:
-            tick = progress and (lambda f: progress((bi + f) / nb, None, None))
-            Y[act] = _aspade_frames(Y[act], LO[act], HI[act], red * w, eps, maxit, xp, dev, tick, group)
+            tick = progress and not devs and (lambda f: progress((bi + f) / nb, None, None))
+            Y[act] = (_aspade_frames(Y[act], LO[act], HI[act], red * w, eps, maxit, xp, "opencl", tick, group, d)
+                      if dev == "opencl" else
+                      _aspade_frames(Y[act], LO[act], HI[act], red * w, eps, maxit, xp, d, tick, group))
+        return s, seg, Y
+    for bi, (s, seg, Y) in enumerate(_in_order(solve, range(nb), devs or [None if dev == "opencl" else dev])):
+        B = len(s); m = s[-1] - s[0] + w
         ws[s[0]:s[0] + m] += np.bincount(seg.ravel(), weights=np.tile(g, B), minlength=m)
         Yg = (Y.reshape(B, ch, w) * g).transpose(1, 0, 2)
         for c in range(ch):
@@ -295,9 +395,57 @@ def aspade(y, lo, hi, w=1024, ov=8, red=2, eps=0.1, maxit=1000, xp=np, dev=None,
     return finish(n)
 
 
-def _aspade_frames(Y, LO, HI, N, eps, maxit, xp, dev, tick=None, group=1):
+def _spade_devices(xp, dev):
+    """The GPUs SPADE's batches are shared between when set_gpus asked for several, or None: PyTorch
+    GPUs (as the NMF engine's), or OpenCL GPUs of the chosen name; without a name, those with at least
+    a quarter of the strongest one's compute units, so an integrated GPU does not hold up the last batch."""
+    if _GPUS[0] == 1 or not is_gpu(dev):
+        return None
+    if dev != "opencl":
+        found = _nmf_devices(dev)
+        return found if isinstance(found, list) else None
+    want = gpu_name().lower().partition("#")[0].strip()
+    found = sorted((d for d in xp.gpus() if want in f"{d.name} {xp.label(d)}".lower()),
+                   key=lambda d: -d.max_compute_units)
+    if not want:  # ponytail: a fixed share; a speed test per device if mixed GPUs ever need it
+        found = [d for d in found if 4 * d.max_compute_units >= found[0].max_compute_units]
+    found = found[:_GPUS[0]] if _GPUS[0] else found
+    return found if len(found) > 1 else None
+
+
+def _in_order(fn, items, devices):
+    """fn(item, device) of each item, yielded in order. With several devices, one thread each, each
+    taking the next item when it is free (as the NMF engine shares its chunks)."""
+    if len(devices) == 1:
+        for it in items:
+            yield fn(it, devices[0])
+        return
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    free = queue.Queue()
+    for d in devices:
+        free.put(d)
+
+    def run(it):
+        d = free.get()
+        try:
+            if isinstance(d, str) and d.startswith("cuda"):  # its own stream, on its device
+                import torch
+                with torch.cuda.device(d), torch.cuda.stream(torch.cuda.Stream(d)):
+                    return fn(it, d)
+            return fn(it, d)
+        finally:
+            free.put(d)
+    pool = ThreadPoolExecutor(len(devices))
+    try:
+        yield from pool.map(run, items)
+    finally:  # an error or a cancel: no more items start
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _aspade_frames(Y, LO, HI, N, eps, maxit, xp, dev, tick=None, group=1, cl_dev=None):
     if dev == "opencl":
-        return xp.aspade_frames(Y, LO, HI, N, eps, maxit, tick, group)
+        return xp.aspade_frames(Y, LO, HI, N, eps, maxit, tick, group, cl_dev)
     w = Y.shape[1]; sq = N ** 0.5
     if xp is np:
         T = lambda v: v
@@ -582,7 +730,8 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=No
         g = h.get("unlimit_g")
         if g is None:
             import unlimit  # needs PyTorch
-            g = unlimit.gain(ref, sr, ul, progress and (lambda f: progress(at(f), None, None)))
+            g = unlimit.gain(ref, sr, ul, progress and (lambda f: progress(at(f), None, None)),
+                             dev=_nmf_device(dev))  # PyTorch's GPU only when a GPU was asked for
         else:
             g = g ** ul
         # gain the input and add declip's correction unscaled (multiplying the declipped signal applied
@@ -649,7 +798,7 @@ def main():
     D = DEFAULTS
     toggle = argparse.BooleanOptionalAction
     p = argparse.ArgumentParser(description="SharpUnClip: SPADE audio declipper and unlimiter")
-    p.add_argument("input", help="input audio (anything libsndfile reads: wav/flac/ogg/...)")
+    p.add_argument("input", nargs="?", help="input audio (anything libsndfile reads: wav/flac/ogg/...)")
     p.add_argument("-o", "--out", help="output path (default input_declipped.wav)")
     p.add_argument("--preset", help=f"start from a preset ({', '.join(PRESETS)}) or a preset "
                                     ".json saved by the GUI; other flags override it")
@@ -733,6 +882,12 @@ def main():
                    help="run on a GPU: auto (default) = OpenCL (any vendor) for the SPADE engine, then "
                         "PyTorch's GPU (cuda: NVIDIA or AMD ROCm, xpu: Intel, mps: Apple), which the NMF "
                         "engine always uses; falls back to CPU")
+    p.add_argument("--gpu-name", metavar="NAME", default=gpu_name(),
+                   help="the GPU every engine uses, by part of its name (see --list-gpus); implies --gpu")
+    p.add_argument("--gpus", metavar="N", default="1",
+                   help="share the work between N GPUs (or all): the NMF engine's chunks, the SPADE "
+                        "engine's frame batches; implies --gpu")
+    p.add_argument("--list-gpus", action="store_true", help="list the GPUs found and exit")
     p.add_argument("--log", metavar="FILE", help="append a run log (params, timings) to FILE")
     p.add_argument("--report", action="store_true", help="print per-channel output peak")
     pre, _ = p.parse_known_args()
@@ -745,6 +900,17 @@ def main():
         else:
             raise SystemExit(f"unknown preset {pre.preset!r} (choose: {', '.join(PRESETS)}, or a .json file)")
     a = p.parse_args()
+    if a.list_gpus:
+        print("\n".join(list_gpus()) or "no GPU found")
+        return
+    if a.input is None:
+        p.error("the input file is required")
+    set_gpu(a.gpu_name)
+    if a.gpus.strip().lower() != "all" and not a.gpus.strip().isdigit():
+        p.error("--gpus takes a number or 'all'")
+    set_gpus(0 if a.gpus.strip().lower() == "all" else a.gpus)
+    if (a.gpu_name or a.gpus.strip() != "1") and not a.gpu:
+        a.gpu = "auto"
     for stage, amount in (("unlimit", a.unlimit_cli), ("uncompress", a.uncompress_cli)):
         if amount is not None:  # bare flag: on at the default amount; 0: off
             setattr(a, stage, amount != 0)
@@ -758,8 +924,9 @@ def main():
     opt = settings_from_cfg(vars(a))
     opt["soft_clip"] = a.soft_clip
     xp, dev = spade_backend(a.gpu)
-    if a.gpu and dev not in GPU_DEVS:
-        print("no GPU backend (pip install pyopencl), using CPU", file=sys.stderr)
+    if a.gpu and not is_gpu(dev):
+        print(f"no GPU named {a.gpu_name!r} (see --list-gpus), using CPU" if a.gpu_name else
+              "no GPU backend (pip install pyopencl), using CPU", file=sys.stderr)
     try:
         import torch
         torch.set_num_threads(threads)
@@ -771,7 +938,8 @@ def main():
     log = RunLog(a.log)
     try:
         log(f"SharpUnClip {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        log(f"input={a.input} backend={backend_name(xp, dev, opt)} threads={threads}")
+        log(f"input={a.input} backend={backend_name(xp, dev, opt)} threads={threads} "
+            f"gpu_name={a.gpu_name or 'auto'} gpus={a.gpus}")
         log(env_info())
         x, sr = sf.read(a.input, always_2d=True)  # (n, ch)
         log(f"sr={sr} samples={x.shape[0]} channels={x.shape[1]}")

@@ -6,7 +6,9 @@ import sys, os, copy, json, threading, queue, time, traceback
 from collections import OrderedDict
 import numpy as np
 import soundfile as sf
-from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, GPU_DEVS, torch_gpu, settings_from_cfg,
+from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, is_gpu, torch_gpu, list_gpus, gpu_name, set_gpu,
+                         set_gpus,
+                         settings_from_cfg,
                          spade_backend, backend_name, RunLog, env_info)
 import session
 from session import Pyramid, Song
@@ -433,6 +435,17 @@ class App:
         act()
         return "break"
 
+    def _pick_gpu(self):
+        """The GPU list (several GPUs): every engine moves to the one picked, or (All GPUs) shares its work
+        between all of them (--gpus all); previews follow."""
+        v = self.gpu_pick.get()
+        set_gpu("" if v in ("Automatic", "All GPUs") else v)
+        set_gpus(0 if v == "All GPUs" else 1)
+        self.gpu_dev = spade_backend(True)[1]
+        if self.torch:
+            self.tgpu = torch_gpu()
+        self._changed("gpu")
+
     def _mode(self, mode):
         self.lin_db.set(mode)
         self.wv.set_mode(mode)
@@ -522,7 +535,7 @@ class App:
         self.dot = tk.Label(aud, text="", bg=BG, fg=MUTED)
         self.dot.pack(side="right")
         self.auto = tk.BooleanVar(value=True)  # view state, not settings: preview when it takes 10 s or less
-        self.fast = tk.BooleanVar(value=self.gpu_dev not in GPU_DEVS)  # NMF fast, SPADE quality <= 3
+        self.fast = tk.BooleanVar(value=not is_gpu(self.gpu_dev))  # NMF fast, SPADE quality <= 3
         for text, var in (("Fast", self.fast), ("Auto", self.auto)):
             ttk.Checkbutton(aud, text=text, variable=var, takefocus=0, command=self._preview).pack(side="right",
                                                                                                 padx=(10, 0))
@@ -577,7 +590,15 @@ class App:
         self.undo_btn.pack(side="left", padx=(8, 2)); self.redo_btn.pack(side="left", padx=2)
         self.adv_btn = ttk.Button(bar, text="Advanced…", command=self.toggle_adv, takefocus=0)
         self.adv_btn.pack(side="right")
-        self.gpu = tk.BooleanVar(value=self.gpu_dev in GPU_DEVS)
+        gpus = list_gpus()  # several: which one every engine uses
+        if len(gpus) > 1:
+            cur = next((g for g in gpus if gpu_name() and gpu_name().lower() == g.lower()), "Automatic")
+            self.gpu_pick = tk.StringVar(value=cur)
+            pick = ttk.Combobox(bar, textvariable=self.gpu_pick, values=["Automatic", "All GPUs"] + gpus, state="readonly",
+                                width=min(30, max(10, *map(len, gpus))), takefocus=0)
+            pick.pack(side="right")
+            pick.bind("<<ComboboxSelected>>", lambda e: self._pick_gpu())
+        self.gpu = tk.BooleanVar(value=is_gpu(self.gpu_dev))
         self.gpu.trace_add("write", lambda *a: self._changed("gpu"))
         ttk.Checkbutton(bar, text="GPU", variable=self.gpu, command=self._commit, takefocus=0).pack(side="right",
                                                                                                     padx=10)
@@ -1100,7 +1121,7 @@ class App:
 
     def _rlen(self):
         """Default region length, s: 4 with a GPU backend, else 2."""
-        return 4.0 if self.gpu.get() and self.gpu_dev in GPU_DEVS else 2.0
+        return 4.0 if self.gpu.get() and is_gpu(self.gpu_dev) else 2.0
 
     def _auto_region(self):
         """Until the user sets a region: the region on the most-clipped spot (else the loudest part),
@@ -1175,7 +1196,7 @@ class App:
         return self.fast.get() and cfg["declip"] and (cfg["engine"] == "NMF" or int(cfg["speed_quality"]) > 3)
 
     def _ekind(self, cfg, fast):
-        gpu = bool(cfg["gpu"]) and (self.gpu_dev in GPU_DEVS if cfg["engine"] == "SPADE" else bool(self.tgpu))
+        gpu = bool(cfg["gpu"]) and (is_gpu(self.gpu_dev) if cfg["engine"] == "SPADE" else bool(self.tgpu))
         return session.est_kind(cfg, fast, gpu)
 
     def _akey(self, cfg, fast):
@@ -1188,8 +1209,8 @@ class App:
         song, k = self.wv.song, self._ekind(cfg, akey[3])
         s = self.est.seconds(k, (akey[1] - akey[0]) / song.sr) if k else 0.0
         if cfg["unlimit"] and cfg["unlimit_amount"] > 0 and (self.G is None
-                                                            or self.G[0] != session.keyof(cfg, session.G_KEYS)):
-            s += self.est.seconds(("unlimit", bool(self.tgpu)), len(song.x) / song.sr) * (1 - self._gp)
+                                                            or self.G[0] != self._gk(cfg)):
+            s += self.est.seconds(("unlimit", self._ndev(cfg) != "cpu"), len(song.x) / song.sr) * (1 - self._gp)
         return s
 
     def est_text(self, r0, r1):
@@ -1252,7 +1273,11 @@ class App:
 
     def unl(self, cfg):
         """The unlimit curve for cfg's levels, (key, G, its pyramid, (peak, p99.9) dB, seconds), or None."""
-        return self.G if self.G is not None and self.G[0] == session.keyof(cfg, session.G_KEYS) else None
+        return self.G if self.G is not None and self.G[0] == self._gk(cfg) else None
+
+    def _gk(self, cfg):
+        """The unlimit curve's key: its levels and the device it runs on (as the render's)."""
+        return session.keyof(cfg, session.G_KEYS) + (self._ndev(cfg),)
 
     def unl_text(self, cfg):
         if not self.torch:
@@ -1261,8 +1286,8 @@ class App:
             return ""
         u = self.unl(cfg)
         if u is not None:
-            return f"gain curve: ready ({(self.tgpu or 'CPU').upper()} {u[4]:.1f} s)"
-        if self._jobs.get("G") == session.keyof(cfg, session.G_KEYS):
+            return f"gain curve: ready ({u[0][-1].upper()} {u[4]:.1f} s)"
+        if self._jobs.get("G") == self._gk(cfg):
             return f"gain curve: computing {100 * self._gp:.0f} %"
         return "gain curve: after the render" if self.rendering else "gain curve: computed when Unlimit is on"
 
@@ -1446,7 +1471,7 @@ class App:
 
     def _need_g(self, cfg):
         """The unlimit curve for these settings: a heavy job, unless it is here or on its way."""
-        gk = session.keyof(cfg, session.G_KEYS)
+        gk = self._gk(cfg)
         if (self.G is None or self.G[0] != gk) and self._jobs.get("G") != gk:
             self.G, self._gp, self._jobs["G"] = None, 0.0, gk
             self.heavy.submit("G", (self.sgen, gk), self._job_g, self.wv.song, cfg, gk, prio=2)
@@ -1473,7 +1498,7 @@ class App:
 
     def _job_g(self, ev, song, cfg, gk):  # the heavy worker; also the gain lane's pyramid and the peaks in dB
         t0 = time.time()
-        G = song.unlimit_raw(cfg, self._ticker(ev, "G", gk))
+        G = song.unlimit_raw(cfg, self._ticker(ev, "G", gk), gk[-1])
         secs = time.time() - t0
         return gk, G, secs, Pyramid(G[:, None]), tuple(20 * np.log10([float(G.max()), float(np.quantile(G, 0.999))]))
 
@@ -1514,8 +1539,8 @@ class App:
                 self.est.update(ek, (akey[1] - akey[0]) / song.sr, secs)
         elif kind == "G":
             gk, G, secs, pyr, db = v
-            self.est.update(("unlimit", bool(self.tgpu)), len(song.x) / song.sr, secs)
-            if self.cfg is not None and gk == session.keyof(self.cfg, session.G_KEYS):
+            self.est.update(("unlimit", gk[-1] != "cpu"), len(song.x) / song.sr, secs)
+            if self.cfg is not None and gk == self._gk(self.cfg):
                 self.G = gk, G, pyr, db, secs
                 self.wv.redraw(("gain",))
         elif kind == "sh":  # the song keeps it: the flags and the preview follow the knee found
@@ -1740,7 +1765,8 @@ class App:
         try:  # everything, so no failure can end the thread without a status and a log
             log(f"SharpUnClip GUI {time.strftime('%Y-%m-%d %H:%M:%S')}")
             log(f"input={self.path} output={outp} sr={sr} samples={len(x)} channels={x.shape[1]}")
-            log(f"backend={backend_name(*spade_backend(cfg.get('gpu')), settings_from_cfg(cfg))}")
+            log(f"backend={backend_name(*spade_backend(cfg.get('gpu')), settings_from_cfg(cfg))} "
+                f"gpu_name={gpu_name() or 'auto'}")
             log(env_info())
             log("settings " + " ".join(f"{k}={v}" for k, v in sorted(cfg.items())))
             an = (hints or {}).get("nmf_analysis")
@@ -2381,7 +2407,7 @@ def _selfcheck():
         # per column exactly; dragging the lane up sets Amount by 0.5 % per px (Shift: 0.05)
         real_G, n = app.G, len(app.x)
         Gs = (10 ** (6 * np.sin(np.linspace(0, 40, n)) ** 2 / 20)).astype(np.float32)
-        app.G = session.keyof(app.cfg, session.G_KEYS), Gs, Pyramid(Gs[:, None]), (6.0, 6.0), 0.0
+        app.G = app._gk(app.cfg), Gs, Pyramid(Gs[:, None]), (6.0, 6.0), 0.0
         app.T["unlimit"].set(1); app._set("unlimit_amount", 40); app._select_page("Unlimit"); settle()
         wv.glane.winfo_width, wv.glane.winfo_height = (lambda: W), (lambda: 64)
         wv._view(0, 128 * (W - G)); wv._draw()  # 128 samples a column: on 64-sample blocks
@@ -2532,6 +2558,12 @@ def _selfcheck():
     assert a2.wv.pv is not None, a2.badge.cget("text")
     a2.heavy.cancel(); top.destroy()
     session.sd = real_sd
+    if hasattr(app, "gpu_pick"):  # several GPUs: All GPUs shares renders between them, Automatic is one
+        import sharpunclip
+        app.gpu_pick.set("All GPUs"); app._pick_gpu()
+        assert sharpunclip._GPUS[0] == 0 and gpu_name() == "" and is_gpu(app.gpu_dev)
+        app.gpu_pick.set("Automatic"); app._pick_gpu()
+        assert sharpunclip._GPUS[0] == 1
     root.destroy()
     print("selfcheck OK")
 

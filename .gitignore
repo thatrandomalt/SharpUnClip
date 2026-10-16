@@ -20,3 +20,4 @@ old/
 *.aiff
 *.aif
 *.log
+!bench/song.flac

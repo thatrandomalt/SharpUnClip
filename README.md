@@ -101,8 +101,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
 **Other GPUs** need their own PyTorch build for the NMF engine (and
-Unlimit). Tested: CUDA (RTX 4070, V100), ROCm (RX 9070, Linux) and Apple
-silicon (M4 Pro, MPS). Intel runs the same PyTorch code but is untested, so if
+Unlimit). Tested: CUDA (RTX 4070, V100), ROCm (RX 9070 and Radeon 8060S,
+Linux) and Apple silicon (M4 Pro, MPS). Intel runs the same PyTorch code but is untested, so if
 it fails, switch *GPU* off (or drop `--gpu`) to use the CPU, and please report
 it.
 - **AMD:** a ROCm build of PyTorch, which shows the GPU to PyTorch as a CUDA
@@ -144,7 +144,7 @@ is enough; no CUDA or ROCm install is needed.
   distribution.
 - **macOS:** Apple's OpenCL is deprecated, but ran the SPADE engine correctly
   on an M4 Pro. Without pyopencl, the SPADE engine uses PyTorch's MPS backend
-  instead (untested).
+  instead: also correct, but 2.5-8x slower, so install pyopencl.
 
 ### 4. Check it works
 

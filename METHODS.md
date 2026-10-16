@@ -663,13 +663,15 @@ laptop in its power-saving state was about 2× slower on the GPU (SPADE:
 **`benchmark.py` on other hardware** (16 s song, seconds; every score within 0.01 dB of the
 reference). The NMF rows run on one GPU even with several, as the song is one chunk:
 
-| Algorithm | Ryzen 9 7945HX, 12 threads | RTX 4070 laptop | 8 × V100 (`--gpus all`) | M4 Pro |
-|---|---|---|---|---|
-| Accurate (NMF normal) | 14.1 | 3.3 | 3.0 | 5.3 |
-| NMF fast | 5.8 | 1.5 | 1.7 | 1.8 |
-| Accurate SPADE | 17.6 | 1.8 | 0.6 | 1.9 |
-| Unmaster | 9.7 | 2.1 | 1.6 | 3.6 |
-| Unmaster SPADE | 9.2 | 1.1 | 0.5 | 1.1 |
+| Algorithm | Ryzen 9 7945HX, 12 threads | RTX 4070 laptop | 8 × V100 (`--gpus all`) | M4 Pro | Radeon 8060S (ROCm) |
+|---|---|---|---|---|---|
+| Accurate (NMF normal) | 14.1 | 3.3 | 3.0 | 5.3 | 4.0 |
+| NMF fast | 5.8 | 1.5 | 1.7 | 1.8 | 1.6 |
+| Accurate SPADE | 17.6 | 1.8 | 0.6 | 1.9 | 4.3 |
+| Unmaster | 9.7 | 2.1 | 1.6 | 3.6 | 2.5 |
+| Unmaster SPADE | 9.2 | 1.1 | 0.5 | 1.1 | 2.2 |
+
+On ROCm the SPADE engine runs through PyTorch, not the faster OpenCL kernel (see section 8).
 
 ### 6.6 Third song, one stage at a time (dhdpmtws)
 
@@ -790,7 +792,8 @@ Each idea below was measured with the same protocol and dropped.
   MPS. A tester's RX 9070 (Linux, PyTorch 2.13 with ROCm 7.1) rendered on
   ROCm once the GPU was asked for before OpenCL: loading Mesa's OpenCL
   (Rusticl) into the process made PyTorch report no GPU, so with a ROCm build
-  the SPADE engine now runs through PyTorch as well. An M4 Pro (MPS, and
+  the SPADE engine now runs through PyTorch as well. A Radeon 8060S (Ryzen AI
+  Max+ 395, ROCm 7.14) and an M4 Pro (MPS, and
   Apple's OpenCL for SPADE) matched the reference scores of `benchmark.py`
   within 0.01 dB. Intel is untested; its device choice is tested by
   simulation.

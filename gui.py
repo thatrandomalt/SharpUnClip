@@ -1856,6 +1856,12 @@ class App:
 
 
 def _selfcheck():
+    try:
+        import torch  # noqa: F401
+    except ImportError:  # the app runs without it (SPADE, Uncompress); this check renders every preset
+        print("selfcheck skipped: it needs PyTorch (every preset is rendered, the NMF ones too); "
+              "test_sharpunclip.py covers the rest")
+        return
     sr = 48000
     t = np.arange(2 * sr) / sr
     rng = np.random.default_rng(1)

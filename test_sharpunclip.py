@@ -136,6 +136,8 @@ def _kick_stereo(sr, secs=2, seed=2):
 
 def test_nmf_engine_auto():
     # NMF engine, automatic analysis: finds the ceiling, keeps everything below it, improves.
+    if not _has_torch():
+        return  # the NMF engine needs PyTorch
     sr = 16000
     src = _kick_stereo(sr)
     cl = np.clip(src, -0.9, 0.9)
@@ -161,6 +163,8 @@ def test_lsb_estimate_ignores_silent_intro():
 
 def test_nmf_engine_manual_detection_bounds():
     # auto_detect off: our clip_above masks and the max_restore cap become its constraints.
+    if not _has_torch():
+        return  # the NMF engine needs PyTorch
     sr = 16000
     src = _kick_stereo(sr, seed=5)
     cl = np.clip(src, -0.9, 0.9)
@@ -274,6 +278,8 @@ def test_cubic_soft_clip_inverse():
 def test_nmf_normal_plus_spade():
     # NMF quality "normal+spade" (our short-frame SPADE as a third fused model): same invariants as the
     # engine (untouched samples bit-exact, rebuilt ones keep sign and grow, cap holds), and it improves.
+    if not _has_torch():
+        return  # the NMF engine needs PyTorch
     sr = 16000
     src = _kick_stereo(sr)
     cl = np.clip(src, -0.9, 0.9)
@@ -352,11 +358,12 @@ def test_cli_presets():
     inp, outp = os.path.join(d, "in.wav"), os.path.join(d, "out.wav")
     sf.write(inp, st, sr, subtype="PCM_16")
     cli = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharpunclip.py"), inp, "-o", outp]
-    r = subprocess.run(cli + ["--preset", "Accurate", "--log", outp + ".log"], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    log = open(outp + ".log").read()
-    assert "clip_above=99.9" in log and "max_restore=0.0" in log and "engine=NMF" in log, log
-    assert np.abs(sf.read(outp)[0]).max() > 1.05
+    if _has_torch():  # Accurate: the NMF engine
+        r = subprocess.run(cli + ["--preset", "Accurate", "--log", outp + ".log"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        log = open(outp + ".log").read()
+        assert "clip_above=99.9" in log and "max_restore=0.0" in log and "engine=NMF" in log, log
+        assert np.abs(sf.read(outp)[0]).max() > 1.05
     r = subprocess.run(cli + ["--engine", "spade", "--log", outp + ".log"], capture_output=True, text=True)
     assert r.returncode == 0 and "engine=SPADE" in open(outp + ".log").read(), r.stderr
     assert np.abs(sf.read(outp)[0]).max() > 1.05

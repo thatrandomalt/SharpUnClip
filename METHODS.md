@@ -128,9 +128,9 @@ high with twice the iterations.
    MPS lacks fall back to the CPU (`PYTORCH_ENABLE_MPS_FALLBACK`).
 4. **normal+spade** (an *NMF quality* option, off by default). SharpUnClip's
    own linked SPADE (section 2.4: 512-sample frames, 16× overlap, capped at
-   2.5|y|) joins the engine's two models below 4 kHz, weighted NMF 0.52,
-   engine SPADE 0.28, ours 0.2; above 4 kHz the NMF model is used alone, as in
-   *normal*. All three models get the same constraint set, and the engine's
+   2.5|y|) joins the engine's two models, weighted NMF 0.52, engine SPADE
+   0.28, ours 0.2 below 4 kHz, and NMF 0.8, ours 0.2 above (*normal* uses NMF
+   alone there). All three models get the same constraint set, and the engine's
    consistency projection runs after the fusion. It costs one extra SPADE
    pass (OpenCL on a GPU, otherwise the CPU). Results in section 6.1.
 
@@ -491,14 +491,18 @@ third song's cubic soft clip (section 6.6); dchc counts for its sign only.
 
 | Render | SNR | Side SNR | HF LSD | Peak error, median per run |
 |---|---|---|---|---|
-| MD clipped | +8.15 → **+8.56** | +8.34 → **+8.54** | 1.67 → 1.66 | −0.30 → −0.22 dB |
-| MD synthetic | +8.11 → **+8.43** | +7.66 → **+7.90** | 2.97 → 2.97 | −0.31 → −0.29 dB |
-| dh synthetic | +7.61 → **+7.85** | +5.99 → **+6.22** | 2.77 → 2.75 | −0.66 → −0.62 dB |
-| dh Clipper | +0.00 change | | | |
+| MD clipped | +8.15 → **+8.63** | +8.34 → **+8.63** | 1.67 → 1.66 | −0.30 → −0.23 dB |
+| MD synthetic | +8.11 → **+8.49** | +7.66 → **+7.96** | 2.97 → 2.97 | −0.31 → −0.32 dB |
+| dh synthetic | +7.61 → **+7.97** | +5.99 → **+6.35** | 2.77 → 2.72 | −0.66 → −0.65 dB |
+| dh Clipper | +0.02 change | | | |
 | dchc clipped | +0.10 change | | | |
 
 The third model's weight was chosen on MD (0.1 / 0.2 / 0.3: +0.24 / +0.41 /
-+0.36 dB) and held on the other renders (0.3 lost 0.02 on dh Clipper).
++0.36 dB) and held on the other renders (0.3 lost 0.02 on dh Clipper). Its
+0.2 above 4 kHz came from a later search over six renders (the five above and
+the benchmark song): with weights fitted on the other renders and scored on
+each in turn, only this change improved all six (+0.00 to +0.20 dB, side SNR
+up, HF LSD the same or lower, peaks within 0.03 dB); section 7 has the rest.
 Using our SPADE *in place of* the engine's scored up to +8.63 on MD but lost
 0.1–0.7 dB on the others, so it was rejected (section 7). The cost is one
 extra SPADE pass, about 40–90 s per song on the RTX 4070, so it is an option
@@ -764,6 +768,9 @@ Each idea below was measured with the same protocol and dropped.
 | NMF engine with the 2.5× cap SPADE uses | −0.05 / −0.18 dB vs no cap (section 6.1) |
 | NMF engine at *high* quality | +0.03 / −0.02 dB vs *normal*, 40% slower |
 | NMF engine's automatic analysis on masters | No change on MD, worse than manual 75% on dchc (section 6.3) |
+| Janssen AR interpolation (Janssen et al. 1986, frame-wise, clip bounds as an active set) as a declipper or a fusion member | Alone +1.29 dB on the benchmark song vs NMF's +4.64; any share in the fusion (0.05-0.3) lowered every score |
+| More fusion members (NMF at 46 / 186 ms, PEW social sparsity, the engine's SPADE at 46 ms), weights fitted on the other renders | +0.08 to +0.59 dB on five renders but −0.15 to −0.29 on MD; about 2x the render time |
+| normal+spade's three members with all weights re-fitted the same way | +0.02 to +0.41 dB on five renders, −0.38 on MD (its own best weights would give +0.21: the renders disagree) |
 | Our SPADE *replacing* the engine's SPADE in the NMF fusion (instead of joining it, section 6.1) | Up to +0.48 dB on MD, but −0.1 to −0.7 dB on the synthetic clips and dh Clipper |
 | Multiplying the declipped signal by the unlimit gain (the previous combination) | Never better than adding the declip correction, up to 1.04 dB worse |
 | Unlinked or half-linked De-limiter gain (each channel from itself) | Within ±0.05 dB of linked |

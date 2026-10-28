@@ -471,9 +471,9 @@ Flag names are for the command line.
 - **NMF quality** (`--nmf-quality`): *fast* (about 4× faster, 1 dB less
   accurate), *normal* (default), *high* and *best* (slower, no measurable
   gain on the test songs), and *normal+spade*, which adds SharpUnClip's own
-  linked SPADE as a third model below 4 kHz: +0.25 to +0.4 dB on clipped
-  songs, for one extra SPADE pass (about 40-90 s per song on a GPU, several
-  minutes on a CPU).
+  linked SPADE as a third model: +0.35 to +0.5 dB on hard-clipped songs, for
+  one extra SPADE pass (about 40-90 s per song on a GPU, several minutes on a
+  CPU).
 - **Auto detect** (`--auto-detect` / `--no-auto-detect`, NMF engine): finds
   the clip or limiter ceiling itself, which was the most accurate on clipped
   songs. Off = use *Clip above* and the detection settings below; the

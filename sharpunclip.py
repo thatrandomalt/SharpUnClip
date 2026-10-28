@@ -262,7 +262,7 @@ def _nmf_constraints(y, sr, opt, cap, device, h):
 def _declip_nmf_spade(y, sr, opt, cap, dev, xp, progress, h):
     """NMF quality "normal+spade": BetterDeclipper's NMF and SPADE models plus our short-frame linked
     A-SPADE (512-sample frames, 16x overlap, rebuilt |x| <= 2.5|y|), all under one constraint set and
-    fused 0.52 / 0.28 / 0.2 below 4 kHz (NMF alone above), as measured in METHODS 6.1."""
+    fused 0.52 / 0.28 / 0.2 below 4 kHz and NMF 0.8 / ours 0.2 above, as measured in METHODS 6.1."""
     from betterdeclipper import engine as E
     from betterdeclipper.methods.common import full_thresholds
     device = _nmf_device(dev)
@@ -293,7 +293,7 @@ def _declip_nmf_spade(y, sr, opt, cap, dev, xp, progress, h):
     ours = aspade(y * s, lo * s, hi * s, 512, 16, xp=xp, dev=dev, progress=p and (lambda f, d, o: p(f)),
                   group=2 if y.shape[1] == 2 else 1, unscale=s, frame0=h.get("start", 0) // 32)
     ests.append(np.clip(ours, lo, hi))
-    out = E.fuse(y, ests, [0.52, 0.28, 0.2], [1.0, 0.0, 0.0], sr)
+    out = E.fuse(y, ests, [0.52, 0.28, 0.2], [0.8, 0.0, 0.2], sr)
     out[~clipped] = y[~clipped]  # the engine's final consistency projection
     out = np.where(m_hi, np.maximum(out, TH), out)
     out = np.where(m_lo, np.minimum(out, TL), out)

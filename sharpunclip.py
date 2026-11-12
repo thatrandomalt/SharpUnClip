@@ -538,13 +538,60 @@ PRESETS = {
 
 
 def settings_from_cfg(cfg):
-    """Settings dict from GUI/CLI/preset values (unknown keys are ignored)."""
+    """Settings dict from GUI/CLI/preset values (unknown keys are ignored). "sections" passes through,
+    normalized: each section's settings are the song's Declip settings with its own on top."""
     out = dict(DEFAULTS)
     for k, v in cfg.items():
         k = k.removeprefix("pa_")  # older preset files
         if k in out and v is not None:
             out[k] = bool(int(v)) if isinstance(DEFAULTS[k], bool) else v
+    if cfg.get("sections"):
+        out["sections"] = [dict(start=float(s["start"]), end=float(s["end"]),
+                                settings={k: (bool(int(v)) if isinstance(DEFAULTS[k], bool) else v)
+                                          for k, v in dict({k: out[k] for k in SECTION_KEYS},
+                                                           **{k: v for k, v in (s.get("settings") or {}).items()
+                                                              if k in SECTION_KEYS and v is not None}).items()})
+                           for s in cfg["sections"] if float(s["end"]) > float(s["start"])]
     return out
+
+
+# The settings a section can have its own of: Declip's, except the song-wide input gain, process rate and GPU.
+SECTION_KEYS = ("declip", "engine", "nmf_quality", "auto_detect", "nmf_knee", "max_restore", "speed_quality",
+                "lookahead", "linked_stereo", "clip_above", "not_clip_below", "not_clip_amp", "dynamic", "soft",
+                "remove_glitch", "peak_ignore", "peak_time", "reset_amp", "reset_time", "diff_clips", "trans_amp",
+                "trans_time")
+
+
+def suggest_sections(x, sr, win_s=2.0, min_s=8.0, step_db=0.5):
+    """Spans whose clip or limiter ceiling differs from the song's main one (e.g. a part mastered 3 dB
+    quieter), as [(start s, end s, ceiling dBFS)]. A window has a ceiling when at least 10 samples sit
+    within 0.05 dB of its peak (flat tops or a limiter's pile-up); windows without one (quiet parts) join
+    the run before them. Runs at least step_db from the main ceiling and min_s long are suggested."""
+    a = np.abs(np.asarray(x, float).reshape(len(x), -1)).max(1)
+    W = max(1, int(win_s * sr))
+    lv = []
+    for i in range(len(a) // W):
+        w = a[i * W:(i + 1) * W]
+        pk = w.max()
+        lv.append(20 * np.log10(pk) if pk > 1e-4 and np.count_nonzero(w >= pk * 10 ** (-0.05 / 20)) >= 10
+                  else np.nan)
+    runs = []  # [first window, last window, levels]
+    for i, v in enumerate(lv):
+        if runs and (np.isnan(v) or abs(v - np.median(runs[-1][2])) <= 0.25):
+            runs[-1][1] = i
+            if not np.isnan(v):
+                runs[-1][2].append(v)
+        elif not np.isnan(v):
+            runs.append([i, i, [v]])
+    if not runs:
+        return []
+    level = lambda r: float(np.median(r[2]))
+    dur = {}
+    for r in runs:
+        dur[round(level(r) * 4) / 4] = dur.get(round(level(r) * 4) / 4, 0) + r[1] - r[0] + 1
+    main = max(dur, key=dur.get)
+    return [(r[0] * win_s, (r[1] + 1) * win_s, level(r)) for r in runs
+            if abs(level(r) - main) >= step_db and (r[1] - r[0] + 1) * win_s >= min_s]
 
 
 def _db2lin(db):
@@ -647,10 +694,79 @@ def _clip_mask(y0, sr, opt):
     return flag_mask(a, expand_steps(*peak_steps(a, sr, opt), len(a)), opt)
 
 
+def _declip(y0, sr, opt, xp, dev, h, progress=None):
+    """The declip stage of y0 (n, ch) with opt: (out, fraction of samples flagged). progress(f, done, out)."""
+    out = y0.copy()
+    # flagged samples keep their sign: |in| <= |out| <= cap*|in|
+    cap = float(opt["max_restore"])
+    cap = max(cap, 1.0) if cap > 0 else np.inf
+    if opt["engine"] == "NMF":
+        out, nmf_info = declip_nmf(y0, sr, opt, cap, dev, progress and (lambda f: progress(f, None, None)), h, xp)
+        if progress:
+            progress(1.0, len(out), out)
+        return out, nmf_info["clipped_frac"]
+    lo, hi = y0.copy(), y0.copy()
+    for c in range(y0.shape[1]):
+        m = h["masks"][c] if h.get("masks") is not None else _clip_mask(y0[:, c], sr, opt)
+        neg, pos = m & (y0[:, c] < 0), m & (y0[:, c] > 0)
+        lo[neg, c] = cap * y0[neg, c]
+        hi[pos, c] = cap * y0[pos, c]
+    flagged = float(np.mean(lo != hi))
+    if np.any(lo != hi):
+        quality = max(0, min(6, int(opt["speed_quality"])))
+        w = 512 << max(0, min(2, int(opt["lookahead"])))
+        ov = (2, 4, 4, 8, 8, 16, 16)[quality]
+        s = h.get("norm") or 1.0 / np.abs(y0).max()  # eps is absolute, so normalise the level
+        grp = 2 if opt["linked_stereo"] and y0.shape[1] == 2 else 1
+        out = aspade(y0 * s, lo * s, hi * s, w, ov, xp=xp, dev=dev, progress=progress, group=grp, unscale=s,
+                     frame0=h.get("start", 0) // (w // ov))
+        out = np.clip(out, lo, hi)  # keeps untouched samples bit-exact
+    return out, flagged
+
+
+SECTION_PAD, SECTION_FADE = 0.5, 0.01  # seconds: context a section is rendered with; its crossfade
+
+
+def _declip_section(y0, base, sr, opt, sec, a, b, st0, xp, dev):
+    """y0[a:b] declipped with the section's own settings, crossfaded into `base` at the section's edges.
+    Its detection is measured on the section alone (its own peak, ceilings, shoulder), so a part mastered
+    quieter gets its own threshold; it is rendered with SECTION_PAD s of context on each side."""
+    so = dict(opt, **sec["settings"])
+    n, ch = y0.shape
+    if so["declip"]:
+        ys = y0[a:b]
+        pad = int(SECTION_PAD * sr)
+        A, B = max(0, a - pad), min(n, b + pad)
+        hs = {"start": st0 + A}
+        if so["engine"] == "NMF" and so["auto_detect"]:
+            from betterdeclipper.auto import analyze
+            from betterdeclipper.detect import estimate_lsb
+            from betterdeclipper.engine import fast_pass
+            k = float(so.get("nmf_knee") or 0.0)
+            hs["nmf_analysis"] = analyze(ys, estimate_lsb(ys), fast_pass(sr, _nmf_device(dev)) if not k else None, sr,
+                                         search=not k)
+        else:  # manual detection on the section alone; the context is never flagged
+            hs["masks"] = [np.r_[np.zeros(a - A, bool), _clip_mask(ys[:, c], sr, so), np.zeros(B - b, bool)]
+                           for c in range(ch)]
+            hs["norm"] = 1.0 / max(float(np.abs(ys).max()), 1e-12)
+        seg = _declip(y0[A:B], sr, so, xp, dev, hs)[0][a - A:b - A]
+    else:
+        seg = y0[a:b]
+    r = np.ones(b - a)  # fades only at the section's own edges (not where this x cuts it)
+    F = min(int(SECTION_FADE * sr), (b - a) // 4)
+    if F and sec["a"] - st0 == a and a > 0:
+        r[:F] = np.linspace(0, 1, F + 2)[1:-1]
+    if F and sec["b"] - st0 == b and b < n:
+        r[-F:] = np.minimum(r[-F:], np.linspace(1, 0, F + 2)[1:-1])
+    return base[a:b] * (1 - r[:, None]) + seg * r[:, None]
+
+
 def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=None):
     """Declip, then unlimit, then uncompress x ((n,) or (n, ch)), as enabled in `opt`
     (see DEFAULTS). progress: see aspade. A dict passed as `info` receives "flagged", the
     fraction of samples declip treated as clipped, and "limited", the fraction the limiter cut.
+    opt["sections"] (optional, see settings_from_cfg): parts of the file (start, end in s) declipped with
+    their own settings, detected on the part alone, and crossfaded in (_declip_section).
     hints: optional dict of precomputed file-global inputs (GUI previews):
       masks        list of per-channel bool arrays: manual-detection flags for this x
       norm         SPADE level normalisation (1 / max|y0| of the whole file)
@@ -663,6 +779,9 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=No
                    it receives the computed gain
       soft_clip_c  opt["soft_clip"] == "cubic": the ceiling, max|y0| of the whole file"""
     opt = dict(DEFAULTS, **(opt or {}))
+    if opt.get("sections") and "a" not in opt["sections"][0]:  # seconds of the file -> its samples, once
+        opt = dict(opt, sections=[dict(s, a=int(round(s["start"] * sr)), b=int(round(s["end"] * sr)))
+                                  for s in opt["sections"]])
     pr = float(opt["process_rate"] or 0)
     if pr > 0 and abs(pr - sr) > 0.5:
         # Same samples, treated as pr Hz. The compressor times describe the real
@@ -682,8 +801,11 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=No
     out = y0.copy()
     ul = float(opt["unlimit_amount"]) / 100.0 if opt["unlimit"] else 0.0
     uc = float(opt["uc_amount"]) / 100.0 if opt["uncompress"] else 0.0
+    n0, st0 = len(y0), h.get("start", 0)
+    secs = [(s, max(0, s["a"] - st0), min(n0, s["b"] - st0)) for s in opt.get("sections") or ()]
+    secs = [(s, a, b) for s, a, b in secs if b > a]  # the sections inside this x, in its samples
     # each active stage gets a share of the progress bar
-    weights = [("declip", 8, bool(opt["declip"])), ("unlimit", 1, ul > 0), ("uncompress", 1, uc > 0)]
+    weights = [("declip", 8, bool(opt["declip"] or secs)), ("unlimit", 1, ul > 0), ("uncompress", 1, uc > 0)]
     total, span = sum(w for _, w, on in weights if on) or 1, {}
     acc = 0
     for name, w, on in weights:
@@ -693,37 +815,19 @@ def process(x, sr, opt=None, xp=np, dev=None, progress=None, info=None, hints=No
     def share(name):
         lo, hi = span[name]
         return lambda f: lo + (hi - lo) * f
-    if y0.size and opt["declip"]:
-        # flagged samples keep their sign: |in| <= |out| <= cap*|in|
-        cap = float(opt["max_restore"])
-        cap = max(cap, 1.0) if cap > 0 else np.inf
+    if y0.size and (opt["declip"] or secs):
         at = share("declip")
-        if opt["engine"] == "NMF":
-            out, nmf_info = declip_nmf(y0, sr, opt, cap, dev, progress and (lambda f: progress(at(f), None, None)),
-                                       h, xp)
+        work = [(n0 if opt["declip"] else 0)] + [b - a for _, a, b in secs]  # progress: by samples processed
+        edge = np.cumsum([0] + work) / max(sum(work), 1)
+        if opt["declip"]:
+            part = lambda f: at(edge[0] + (edge[1] - edge[0]) * f)
+            out, flagged = _declip(y0, sr, opt, xp, dev, h, progress and (lambda f, d, o: progress(part(f), d, o)))
             if info is not None:
-                info["flagged"] = nmf_info["clipped_frac"]
+                info["flagged"] = flagged
+        for i, (sec, a, b) in enumerate(secs):  # each section with its own settings, spliced in
+            out[a:b] = _declip_section(y0, out, sr, opt, sec, a, b, st0, xp, dev)
             if progress:
-                progress(at(1.0), len(out), out)
-        else:
-            lo, hi = y0.copy(), y0.copy()
-            for c in range(y0.shape[1]):
-                m = h["masks"][c] if h.get("masks") is not None else _clip_mask(y0[:, c], sr, opt)
-                neg, pos = m & (y0[:, c] < 0), m & (y0[:, c] > 0)
-                lo[neg, c] = cap * y0[neg, c]
-                hi[pos, c] = cap * y0[pos, c]
-            if info is not None:
-                info["flagged"] = float(np.mean(lo != hi))
-            if np.any(lo != hi):
-                quality = max(0, min(6, int(opt["speed_quality"])))
-                w = 512 << max(0, min(2, int(opt["lookahead"])))
-                ov = (2, 4, 4, 8, 8, 16, 16)[quality]
-                s = h.get("norm") or 1.0 / np.abs(y0).max()  # eps is absolute, so normalise the level
-                prog = progress and (lambda f, d, o: progress(at(f), d, o))
-                grp = 2 if opt["linked_stereo"] and y0.shape[1] == 2 else 1
-                out = aspade(y0 * s, lo * s, hi * s, w, ov, xp=xp, dev=dev, progress=prog, group=grp, unscale=s,
-                             frame0=h.get("start", 0) // (w // ov))
-                out = np.clip(out, lo, hi)  # keeps untouched samples bit-exact
+                progress(at(edge[i + 2]), len(out), out)
     if y0.size and ul > 0:
         at = share("unlimit")
         ref = h.get("unlimit_ref", y0)

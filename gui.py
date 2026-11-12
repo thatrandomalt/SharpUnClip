@@ -7,7 +7,7 @@ from collections import OrderedDict
 import numpy as np
 import soundfile as sf
 from sharpunclip import (process, DEFAULTS, PRESETS, NMF_QUALITIES, is_gpu, torch_gpu, list_gpus, gpu_name, set_gpu,
-                         set_gpus,
+                         set_gpus, SECTION_KEYS, suggest_sections,
                          settings_from_cfg,
                          spade_backend, backend_name, RunLog, env_info)
 import session
@@ -158,6 +158,9 @@ class App:
         self._det_cfg = None  # the settings of the latest manual-detection jobs
         self._mode, self._shp = "?", None  # the detection shown (see _det_mode); knee search progress
         self.sr, self.path = 0, None
+        # sections: parts of the song with their own Declip settings ({start, end (s), settings}); the one
+        # being edited (None: the whole song), the song's own Declip values meanwhile, undo history per part
+        self.sections, self.sec_i, self._base_vals, self._stacks = [], None, None, {}
         self.q = queue.Queue()
         self.light, self.gen, self.region_user_set = session.Worker(self.q), 0, False
         # region previews: the heavy worker (shares the GPU with renders), stage-A results (LRU), the
@@ -624,6 +627,22 @@ class App:
             self.pages[title] = page = ttk.Frame(self.insp)
             box = self._section(page, title, toggle, True, cols, items)
             box.pack(fill="x")
+            if title == "Declip":  # parts of the song with their own Declip settings
+                row = ttk.Frame(page); row.pack(fill="x", pady=(6, 0))
+                ttk.Label(row, text="Section", style="Muted.TLabel").pack(side="left")
+                self.sec_var = tk.StringVar(value="Whole song")
+                self.sec_box = ttk.Combobox(row, textvariable=self.sec_var, values=["Whole song"], width=16,
+                                            state="readonly", takefocus=0)
+                self.sec_box.pack(side="left", padx=(6, 4), fill="x", expand=True)
+                self.sec_box.bind("<<ComboboxSelected>>", lambda e: self.open_section(self.sec_box.current() - 1))
+                self.sec_del = ttk.Button(row, text="✕", width=2, takefocus=0, command=self.remove_section)
+                self.sec_del.pack(side="right")
+                row = ttk.Frame(page); row.pack(fill="x", pady=(4, 0))
+                ttk.Button(row, text="+ Region", takefocus=0, command=self.add_section).pack(side="left", fill="x",
+                                                                                          expand=True)
+                ttk.Button(row, text="Suggest", takefocus=0, command=self.suggest).pack(side="left", fill="x",
+                                                                                         expand=True, padx=(4, 0))
+                self.sec_del.state(["disabled"])
             if toggle == "unlimit" and not self.torch:
                 ttk.Label(box, text="needs PyTorch", style="Muted.TLabel").grid(row=1, column=0, columnspan=2,
                                                                                  sticky="w")
@@ -767,11 +786,31 @@ class App:
             self.status.config(text=f"can't read input: {e}")
             return False
         self.path = p
-        self._stop_audio()
+        if self.sec_i is not None:
+            self.open_section(None)
+        self.sections = []
+        self._sec_refresh()
         if self.player.sr != self.sr:  # the stream runs at the file's rate
+            self._stop_audio()
             self.player.close()
             self.player = session.Player(self.sr)
-        self.wv.set_song(Song(self.x, self.sr, p))
+        self._set_song(Song(self.x, self.sr, p))
+        self._info()
+        return True
+
+    def _info(self):
+        """The file line: name, rate, channels, length; while a section is edited, which part is shown."""
+        n, ch = self.x.shape
+        part = "" if self.sec_i is None else f"   ·   section {self.sec_var.get()} shown"
+        self.info.config(text=f"{os.path.basename(self.path)}   ·   {self.sr / 1000:g} kHz   ·   "
+                              f"{'mono' if ch == 1 else 'stereo' if ch == 2 else f'{ch} ch'}   ·   "
+                              f"{mmss(n / self.sr)}{part}")
+
+    def _set_song(self, song):
+        """Show `song` (the file, or a section of it as if it were the song): everything computed for the
+        previous one is dropped and its detection and preview start."""
+        self._stop_audio()
+        self.wv.set_song(song)
         self.gen += 1  # results for the previous song are dropped
         self.region_user_set = False
         self.sgen += 1  # previews too
@@ -779,14 +818,114 @@ class App:
         self.lru.clear()
         self.G = self.ucg = self.prev = self.rkey = self.full = self._stopped = self._shp = self._lv = None
         self._jobs, self._gp, self._mode = {}, 0.0, "?"
-        n, ch = self.x.shape
-        self.info.config(text=f"{os.path.basename(p)}   ·   {self.sr / 1000:g} kHz   ·   "
-                              f"{'mono' if ch == 1 else 'stereo' if ch == 2 else f'{ch} ch'}   ·   {mmss(n / self.sr)}")
         self.bar["value"] = 0
         self.status.config(text="Ready.")
         self._detect(LIGHT_KEYS)
         self._preview_soon()
-        return True
+
+    # ---- sections: parts of the song with their own Declip settings ----
+    def _sec_span(self, s):
+        return int(round(s["start"] * self.sr)), min(len(self.x), int(round(s["end"] * self.sr)))
+
+    def _sec_refresh(self):
+        """The Section list, the part shown in it, the ✕ button, and the sections on the overview strip."""
+        labels = [f"{mmss(s['start'])}–{mmss(s['end'])}" for s in self.sections]
+        self.sec_box.configure(values=["Whole song"] + labels)
+        self.sec_var.set("Whole song" if self.sec_i is None else labels[self.sec_i])
+        self.sec_del.state(["!disabled" if self.sec_i is not None else "disabled"])
+        self.wv.sections = [] if self.sec_i is not None else [self._sec_span(s) for s in self.sections]
+        self.wv.redraw(("ov",))
+
+    def full_cfg(self):
+        """The settings of the whole song for a render or a preset file: the song's own Declip values (also
+        while a section is edited) and every section with its settings."""
+        cfg = self.collect()
+        secs = [dict(s) for s in self.sections]
+        if self.sec_i is not None:
+            secs[self.sec_i] = dict(secs[self.sec_i], settings={k: cfg[k] for k in SECTION_KEYS})
+            cfg = dict(cfg, **self._base_vals)
+        if secs:
+            cfg["sections"] = secs
+        return cfg
+
+    def add_section(self):
+        """+ Region: the region becomes a section with the song's current Declip settings, and opens."""
+        if self.sec_i is not None or self.wv.song is None:
+            return self.status.config(text="Go back to Whole song to add a section.")
+        r = self.wv.region
+        if r is None or r[1] - r[0] < self.sr:
+            return self.status.config(text="Select a region of at least 1 s first (drag on the waveform).")
+        start, end = r[0] / self.sr, r[1] / self.sr
+        if any(start < s["end"] and s["start"] < end for s in self.sections):
+            return self.status.config(text="That region overlaps a section.")
+        try:
+            cfg = self.collect()
+        except ValueError as e:
+            return self.status.config(text=str(e))
+        self.sections = sorted(self.sections + [dict(start=start, end=end,
+                                                     settings={k: cfg[k] for k in SECTION_KEYS})],
+                               key=lambda s: s["start"])
+        self.open_section(next(i for i, s in enumerate(self.sections) if s["start"] == start))
+
+    def suggest(self):
+        """Suggest: a section for each part whose ceiling differs from the song's (its detection is then
+        measured on it alone), with the song's current Declip settings."""
+        if self.sec_i is not None or self.x is None:
+            return self.status.config(text="Go back to Whole song to suggest sections.")
+        try:
+            cfg = self.collect()
+        except ValueError as e:
+            return self.status.config(text=str(e))
+        new = [(a, b, lv) for a, b, lv in suggest_sections(self.x * 10 ** (cfg["input_gain"] / 20), self.sr)
+               if not any(a < s["end"] and s["start"] < b for s in self.sections)]
+        self.sections = sorted(self.sections + [dict(start=a, end=b, settings={k: cfg[k] for k in SECTION_KEYS})
+                                                for a, b, _ in new], key=lambda s: s["start"])
+        self._sec_refresh()
+        self.status.config(text="No part with a different ceiling found." if not new else
+                           f"Added {len(new)} section{'s' * (len(new) > 1)}: " + ", ".join(
+                               f"{mmss(a)}–{mmss(b)} (ceiling {lv:+.2f} dB)" for a, b, lv in new))
+
+    def remove_section(self):
+        if self.sec_i is not None:
+            i = self.sec_i
+            self.open_section(None)
+            del self.sections[i]
+            self._stacks = {None: self._stacks.get(None, ([], [], None))}  # the others' indices moved
+            self._sec_refresh()
+
+    def open_section(self, i):
+        """Edit section i (None: the whole song). A section is shown as if it were the song: its audio alone,
+        its own Declip settings, detection and previews, as the render treats it."""
+        i = None if i is None or i < 0 else i
+        if i == self.sec_i:
+            return self._sec_refresh()
+        try:
+            cfg = self.collect()
+        except ValueError as e:
+            self._sec_refresh()
+            return self.status.config(text=str(e))
+        self._stacks[self.sec_i] = (self.undo_stack, self.redo_stack, self.committed)
+        if self.sec_i is not None:  # keep the section's settings, back to the song's
+            self.sections[self.sec_i]["settings"] = {k: cfg[k] for k in SECTION_KEYS}
+            vals = self._base_vals
+        else:
+            self._base_vals = {k: cfg[k] for k in SECTION_KEYS}
+        if i is not None:
+            vals = self.sections[i]["settings"]
+        self.sec_i = i
+        self.apply_cfg(vals)
+        self.undo_stack, self.redo_stack, self.committed = self._stacks.get(i, ([], [], None))
+        self._commit()
+        if i is None:
+            self._set_song(Song(self.x, self.sr, self.path))
+        else:
+            a, b = self._sec_span(self.sections[i])
+            self._set_song(Song(self.x[a:b], self.sr, self.path))
+        self._sec_refresh()
+        self._info()
+        self.status.config(text="Editing the whole song." if i is None else
+                           f"Editing section {self.sec_var.get()}: its own Declip settings, measured on it alone. "
+                           "Render still renders the whole song.")
 
     def apply_preset(self, name):
         self.preset.set(name)
@@ -823,7 +962,7 @@ class App:
         p = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON preset", "*.json")])
         if p:
             with open(p, "w") as f:
-                json.dump(self.collect(), f, indent=2)
+                json.dump(self.full_cfg(), f, indent=2)
             self.status.config(text="saved " + p)
 
     def load_preset(self, p=None):
@@ -831,6 +970,12 @@ class App:
         if p:
             with open(p) as f:
                 cfg = json.load(f)
+            if self.sec_i is not None:
+                self.open_section(None)
+            self.sections = [dict(start=float(s["start"]), end=float(s["end"]), settings=dict(s.get("settings") or {}))
+                             for s in cfg.get("sections") or ()]
+            self._stacks = {}
+            self._sec_refresh()
             self.apply_cfg(cfg)
             try:  # as applied: a partial or non-canonical file still reads "from <file>"
                 self.base = settings_from_cfg(self.collect())
@@ -1720,7 +1865,7 @@ class App:
         if inp != self.path and not self.load_input(inp):
             return
         try:
-            cfg = self.collect()
+            cfg = self.full_cfg()  # the whole song with every section, also while one is edited
         except ValueError as e:
             self.status.config(text=str(e))
             return
@@ -1749,8 +1894,9 @@ class App:
         make: this song's ceilings at these levels, with the shoulder searched on the render's device, or
         a knee set (no search). Else None: the render analyses as the CLI does."""
         song = self.wv.song
-        if song is None or self._det_mode(cfg) != "auto" or song.peek("ceil", cfg, session.G_KEYS) is None:
-            return None
+        if (song is None or self.sec_i is not None or self._det_mode(cfg) != "auto"
+                or song.peek("ceil", cfg, session.G_KEYS) is None):
+            return None  # (while a section is edited, the song shown is the section, not the song rendered)
         sh = self._sh(cfg)
         return None if sh is None and not cfg["nmf_knee"] else {"nmf_analysis": copy.deepcopy(song.analysis(cfg, sh))}
 
@@ -1807,7 +1953,7 @@ class App:
                 if m[0] == "p":
                     self.frac = m[1]
                     if m[3] is not None:
-                        self.wv.set_output(m[3], m[2])
+                        self._show_output(m[3], m[2])
                 elif m[0].startswith("job"):
                     self._on_job(*m)
                 else:
@@ -1816,6 +1962,13 @@ class App:
                 self.root.report_callback_exception(*sys.exc_info())
         if render and render[-1][0] == "p":
             self._progress_text()
+
+    def _show_output(self, out, done):
+        """The render (of the whole song) drawn over the song shown: while a section is edited, its part."""
+        if self.sec_i is not None:
+            a, b = self._sec_span(self.sections[self.sec_i])
+            out, done = out[a:b], min(max(done - a, 0), b - a)
+        self.wv.set_output(out, done)
 
     def _progress_text(self):
         el = time.time() - self.t0
@@ -1831,13 +1984,13 @@ class App:
         self.run_btn.config(state="normal"); self.cancel_btn.config(state="disabled")
         el = time.time() - self.t0
         if m[0] == "done":
-            self.wv.set_output(m[1], len(m[1]))
+            self._show_output(m[1], len(m[1]))
             self.bar["value"] = 1.0
             pk = float(np.abs(m[1]).max())
             self.status.config(text=f"Done in {mmss(el)} ({len(self.x) / self.sr / max(el, 1e-6):.1f}× realtime)"
                                     f"   ·   peak {pk:.2f} ({20 * np.log10(max(pk, 1e-9)):+.1f} dBFS)"
                                     f"   ·   {os.path.basename(m[2])}{self.note}")
-            if self._rgen == self.sgen:  # B = this render for any region while the settings match
+            if self._rgen == self.sgen and self.sec_i is None:  # B = this render for any region while the settings match
                 self.full, self.full_pk = m[1], pk
                 c = self.rcfg
                 self.full_cut = m[3].get("limited", 0.0)
@@ -2564,6 +2717,21 @@ def _selfcheck():
     assert a2.wv.pv is not None, a2.badge.cget("text")
     a2.heavy.cancel(); top.destroy()
     session.sd = real_sd
+    if app.x is not None and len(app.x) >= app.sr:  # sections: + Region opens one, shown as if it were the song
+        app.open_section(None); app.sections = []; app._sec_refresh()
+        n_song = len(app.x)
+        app._set("clip_above", 90.0); app._commit()  # the song's value
+        app.wv.region = (0, app.sr)
+        app.add_section()
+        assert app.sec_i == 0 and len(app.wv.song.x) == app.sr and app.sec_var.get() == "0:00–0:01"
+        app._set("clip_above", 80.0); app._commit()  # the section's own
+        cfg = app.full_cfg()
+        assert cfg["clip_above"] == 90.0 and cfg["sections"][0]["settings"]["clip_above"] == 80.0, cfg.get("sections")
+        app.open_section(None)
+        assert app.sec_i is None and len(app.wv.song.x) == n_song and float(app.V["clip_above"].get()) == 90.0
+        assert app.sections[0]["settings"]["clip_above"] == 80.0 and app.wv.sections == [(0, app.sr)]
+        app.open_section(0); app.remove_section()
+        assert app.sections == [] and app.sec_i is None and len(app.wv.song.x) == n_song
     if hasattr(app, "gpu_pick"):  # several GPUs: All GPUs shares renders between them, Automatic is one
         import sharpunclip
         app.gpu_pick.set("All GPUs"); app._pick_gpu()

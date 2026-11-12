@@ -372,6 +372,33 @@ declip preview starts, when you let go.
   and the gain lane), Up and Down nudge it (Shift: fine), Return types its
   value, BackSpace puts it back to the preset, Esc deselects.
 
+#### Sections: parts with their own Declip settings
+
+Some songs change their master bus partway through, so one part is clipped
+or limited at -0.1 dB and another at -3 dB. Song-wide detection then misses
+the quieter part. A *section* is a part of the song with its own Declip
+settings, and its detection is measured on that part alone (its own peak,
+ceilings and soft shoulder).
+
+- **+ Region** (Declip page, under the settings) turns the selected region
+  into a section, with the song's current Declip settings, and opens it.
+- **Suggest** finds the parts whose ceiling differs from the song's main one
+  by 0.5 dB or more, for at least 8 s, and adds them as sections. Often that
+  is all it takes: measured on its own, the part's ceiling is found.
+- **Section** list: *Whole song*, or a section to edit. An open section is
+  shown as if it were the song: its audio alone, its own settings, lines,
+  histogram and previews, exactly as the render treats it. Unlimit,
+  Uncompress and Output stay song-wide. **✕** removes the open section.
+- **Render** always renders the whole song with every section: each is
+  rendered with 0.5 s of context on both sides and crossfaded in over 10 ms;
+  everything outside the sections is exactly the song-wide result. A render
+  takes longer by the sections' length.
+- Sections are saved with the settings (**Save**) and work on the command
+  line through that file: `--preset song.json`. In *Whole song*, a region's
+  preview uses the song's settings; open a section to preview it.
+- Overlapping sections are not allowed. The sections show as a yellow bar on
+  the overview strip.
+
 #### Unlimit, Uncompress and Output
 
 - While Unlimit or Uncompress is on, a gain lane under the waveform shows their
@@ -598,6 +625,8 @@ Levels and Limiter are also on the Output page of the main window.
   auto detection saw no ceiling, which is normal for limited masters. Use the
   **Unmaster** preset, or switch *Auto detect* off.
 - **The song is mastered/limited, not just clipped:** the **Unmaster** preset.
+- **One part peaks lower than the rest** (its master bus changed): **Suggest**
+  under the Declip settings, or make that part a section (**+ Region**).
 - **The song is compressed but you don't know how:** the **Uncompress**
   preset, a gentle generic inversion. Use it only on compressed songs: it
   also changes audio that was never compressed.

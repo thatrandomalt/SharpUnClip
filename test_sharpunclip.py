@@ -7,6 +7,7 @@ import numpy as np
 import soundfile as sf
 import sharpunclip as U
 import session
+from abtest import snr
 
 SPADE = dict(U.PRESETS["Accurate SPADE"])
 
@@ -893,6 +894,49 @@ def test_resample_matches_torchaudio():
     w = torch.from_numpy(np.random.default_rng(0).standard_normal((2, 9000)).astype(np.float32))
     for sr in (48000, 22050, 96000, 32000, 44100, 16000):
         assert torch.equal(unlimit.resample(w, sr, 44100), AF.resample(w, sr, 44100)), sr
+
+
+def _two_level(sr, secs=4):
+    """Three parts of a kick loop; the middle one clipped 3.3 dB lower (another mastering of that part)."""
+    src = np.concatenate([_kick_stereo(sr, secs=secs, seed=s) for s in (1, 2, 3)])
+    src = 1.3 * src / np.abs(src).max()
+    c = np.full(len(src), 0.95)
+    c[len(src) // 3:2 * len(src) // 3] = 0.65
+    return src, np.clip(src, -c[:, None], c[:, None])
+
+
+def test_sections():
+    # A part with its own Declip settings, detected on it alone: the quieter-clipped middle is restored
+    # only as a section; the rest stays bit-identical; it also holds at another process rate.
+    sr = 16000
+    src, y = _two_level(sr)
+    n, t3 = len(y), len(y) // 3
+    mid, rest = slice(t3 + sr // 2, 2 * t3 - sr // 2), np.r_[0:t3 - 200, 2 * t3 + 200:n]
+    for preset in ("Accurate SPADE",) + (("Accurate",) if _has_torch() else ()):
+        base = U.settings_from_cfg(U.PRESETS[preset])
+        with_sec = U.settings_from_cfg(dict(U.PRESETS[preset], sections=[dict(start=4.0, end=8.0)]))
+        o0, o1 = U.process(y, sr, base), U.process(y, sr, with_sec)
+        assert snr(src[mid], o0[mid]) - snr(src[mid], y[mid]) < 0.01, preset  # song-wide: not seen as clipped
+        assert snr(src[mid], o1[mid]) - snr(src[mid], y[mid]) > 3.0, preset
+        assert np.array_equal(o0[rest], o1[rest]), preset
+    o2 = U.process(y, sr, dict(with_sec, process_rate=sr / 2))
+    assert snr(src[mid], o2[mid]) - snr(src[mid], y[mid]) > 3.0 and np.array_equal(o2[rest], U.process(
+        y, sr, dict(base, process_rate=sr / 2))[rest])
+    s = U.settings_from_cfg(dict(U.PRESETS["Accurate SPADE"], sections=[dict(start=1, end=2,
+                                                                         settings=dict(clip_above=80, dynamic=0))]))
+    st = s["sections"][0]["settings"]
+    assert st["clip_above"] == 80 and st["dynamic"] is False and st["engine"] == "SPADE" and set(st) == set(
+        U.SECTION_KEYS)
+    assert set(U.SECTION_KEYS) == session.A_KEYS - {"gpu", "input_gain", "process_rate"}
+
+
+def test_suggest_sections():
+    # The part mastered at another ceiling is found, at its own level; unclipped audio gets nothing.
+    sr = 16000
+    src, y = _two_level(sr, secs=12)
+    (a, b, lv), = U.suggest_sections(y, sr)
+    assert (a, b) == (12.0, 24.0) and abs(lv - 20 * np.log10(0.65)) < 0.05, (a, b, lv)
+    assert U.suggest_sections(0.5 * src / np.abs(src).max(), sr) == []
 
 
 def test_nmf_multi_device():

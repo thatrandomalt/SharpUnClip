@@ -270,6 +270,7 @@ class WaveView(ttk.Frame):
         self._parts, self._img, self._base, self._ovbase, self._pan0, self._ovgrab = set(), {}, None, None, None, None
         self._deco = None
         self.det, self._detv, self.region, self.cursor, self._rg, self._ovreg = {}, 0, None, None, None, None
+        self.sections = []  # (start, end) samples of the song's sections: a bar on the overview strip
         # handles: live list, tab boxes, hovered / keyboard-selected key, the drag in progress, the
         # pointer it waits to apply, extra fit while dragging the cap; frame bracket, hovered frame width
         self.handles, self._tabs, self.hover, self.sel, self.drag = [], [], None, None, None
@@ -1575,6 +1576,9 @@ class WaveView(ttk.Frame):
         cv.create_rectangle(x0, 0, max(x1 - 1, x0 + 1), Hw, outline=FG, tags="deco")
         if 0 < self.done < n:
             cv.create_line(self._ovx(self.done), 0, self._ovx(self.done), H, fill=FG, tags="deco")
+        for a, b in self.sections:
+            cv.create_rectangle(self._ovx(a), 0, max(self._ovx(b) - 1, self._ovx(a) + 1), 2, fill=THRESH, width=0,
+                                tags="deco")
         for r in self.det["hot"] if show else ():
             xc = self._ovx((r[0] + r[1]) / 2)
             cv.create_polygon(xc - 4, 0, xc + 4, 0, xc, 7, fill=FLAG, tags="deco")

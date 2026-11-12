@@ -423,6 +423,8 @@ integrated GPU).
 | `test_torch_gpu_pick` | With CUDA absent, an Intel (XPU) or Apple (MPS) GPU is picked for both engines (simulated). |
 | `test_nmf_multi_device` | `--gpus`: the NMF engine's chunks shared between devices (one device twice, on the CPU and the GPU) give exactly the one-device result; the CLI logs it. |
 | `test_spade_multi_device` | `--gpus`: SPADE's batches shared between devices (one device twice) give exactly the one-device result, with progress in order; on every backend. |
+| `test_sections` | A part clipped 3.3 dB lower than the rest is missed song-wide and restored as a section (SPADE and NMF), also at another process rate; everything outside the section is bit-identical; section settings inherit the song's. |
+| `test_suggest_sections` | The part with another ceiling is suggested at its own level and span; unclipped audio gets none. |
 | `test_gpu_choice` | One GPU for every engine by name: PyTorch's index (simulated: two identical cards, "#2"), and each real OpenCL GPU by its listed name. |
 | `test_gpu_probe_order` | ROCm (simulated): PyTorch's GPU is found before OpenCL is loaded, auto then skips OpenCL, and MIOpen is off. |
 | `test_nmf_engine_manual_detection_bounds` | NMF engine with SharpUnClip's detection: unflagged samples bit-exact, rebuilt ones keep their sign and stay within \|y\| ≤ \|x̂\| ≤ m\|y\|. |

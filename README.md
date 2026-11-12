@@ -310,7 +310,8 @@ else works. Nothing plays until you press Play.
 
 With manual detection (SPADE, or NMF with *Auto detect* off), on the Declip
 page:
-- The waveform shows the measured peak (dotted), the *Clip above* threshold
+- The waveform shows the measured peak (dotted; the top and bottom each have
+  their own, so asymmetric clipping is caught on both sides), the *Clip above* threshold
   (yellow), the *Not-clip below* line when *Dynamic threshold* is off,
   *Soft-clip detection* at 92%, the *Not-clip level* and *Gap level* lines, and
   the *Max restore* cap, each with a tag at the right. The gaps between songs

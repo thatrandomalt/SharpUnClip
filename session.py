@@ -209,9 +209,13 @@ class Song:
         y0 = self.x * U._db2lin(cfg["input_gain"])
         return unlimit.raw_gain(y0, rate_p(cfg, self.sr), tick, dev=dev).astype(np.float32)
 
+    def ys(self, cfg, c):
+        """y0 of channel c, signed."""
+        return self.x[:, c] * U._db2lin(cfg["input_gain"])
+
     def y0(self, cfg, c):
         """|y0| of channel c: the level detection sees."""
-        return np.abs(self.x[:, c] * U._db2lin(cfg["input_gain"]))
+        return np.abs(self.ys(cfg, c))
 
     def _y(self, cfg):
         """y0 (n, ch) as process() makes it."""
@@ -308,10 +312,10 @@ class Song:
         return self._cached("scale", cfg, FLAG_KEYS, f)
 
     def steps(self, cfg):
-        """Per channel: the measured-peak staircase (starts, values)."""
+        """Per channel: the measured-peak staircase (starts, values (k, 2): top, bottom)."""
         sp = rate_p(cfg, self.sr)
         return self._cached("steps", cfg, PEAK_KEYS,
-                            lambda: [U.peak_steps(self.y0(cfg, c), sp, cfg) for c in range(self.x.shape[1])])
+                            lambda: [U.peak_steps(self.ys(cfg, c), sp, cfg) for c in range(self.x.shape[1])])
 
     def gaps(self, cfg):
         """Per channel: (starts, ends) of the gaps between sections, or None without Different clips."""
@@ -331,7 +335,7 @@ class Song:
             n, ch = self.x.shape
             M, dropped, raw_opt = np.empty((n, ch), bool), [], dict(cfg, remove_glitch=False)
             for c, st in enumerate(self.steps(cfg)):
-                raw = U.flag_mask(self.y0(cfg, c), U.expand_steps(*st, n), raw_opt)
+                raw = U.flag_mask(self.y0(cfg, c), U.side_peaks(self.ys(cfg, c), st), raw_opt)
                 M[:, c] = U.mask_min_run(raw, 2) if cfg["remove_glitch"] else raw
                 dropped.append(np.flatnonzero(raw & ~M[:, c]))
             return _flagset(M, dropped)
@@ -345,13 +349,13 @@ class Song:
         return self._cached("stats", cfg, FLAG_KEYS, lambda: _stats(*self.flags(cfg)[:2], self.sr))
 
     def hist9(self, cfg):
-        """Per channel: counts of u = -log10(1 - |y0| / peaks(t)) in NINES bins, plus a last bin for
-        the samples at or above the measured peak."""
+        """Per channel: counts of u = -log10(1 - |y0| / peaks(t)) in NINES bins (each sample against its
+        own side's peak), plus a last bin for the samples at or above the measured peak."""
         def f():
             lo, hi, bins = NINES
             out = []
             for c, st in enumerate(self.steps(cfg)):
-                r = self.y0(cfg, c) / U.expand_steps(*st, len(self.x))
+                r = self.y0(cfg, c) / U.side_peaks(self.ys(cfg, c), st)
                 top = int(np.count_nonzero(r >= 1))
                 r = r[(r >= 1 - 10 ** -lo) & (r < 1)]
                 b = ((-np.log10(1 - r) - lo) * (bins / (hi - lo))).astype(np.int64)

@@ -54,6 +54,11 @@ def _stair(starts, values, e):
             np.maximum(np.maximum.reduceat(v, i0), v[i1]))
 
 
+def _peak(steps, p, e, k=1):
+    """Manual detection's measured peak of side p (0 top, 1 bottom): _stair's min (k=0) or max (k=1)."""
+    return _stair(steps[0], steps[1][:, p], e)[k]
+
+
 def _segments(ys, ok):
     """Flat point lists (x = column) of a staircase through ys, one per run of ok columns."""
     out = []
@@ -169,7 +174,7 @@ def build_handles(app, cfg, page):
         return _auto_handles(app, cfg, app.wv) if det.get("ceil") is not None else []
     if not app.applies("clip_above") or det.get("steps") is None:
         return []
-    pk = lambda c, e, pol=1: _stair(*det["steps"][c], e)[1]
+    pk = lambda c, e, pol=1: _peak(det["steps"][c], int(pol < 0), e)
     pct = dict(ref=pk, lev=lambda v: v / 100, val=lambda r: 100 * r, step=0.1, fine=0.01, lo=1.0, hi=100.0)
     db = dict(ref=lambda c, e, pol=1: np.ones(len(e) - 1), lev=lambda v: 10 ** (v / 20),
               val=lambda r: 20 * np.log10(max(r, 1e-12)), step=1.0, fine=0.1, lo=-120.0, hi=0.0)
@@ -1084,7 +1089,7 @@ class WaveView(ttk.Frame):
         i1 = max(i0 + 1, int(min(self._t(e.x + 1), n)))
         if d["steps"] is not None:
             st, pk = d["steps"][c]
-            text += f" · {100 * abs(v) / pk[np.searchsorted(st, i0, 'right') - 1]:.1f} % of local peak"
+            text += f" · {100 * abs(v) / pk[np.searchsorted(st, i0, 'right') - 1, int(v < 0)]:.1f} % of local peak"
         elif d["ceil"] is not None:
             p = int(v < 0)
             r = d["ceil"]["refs"][c][p]
@@ -1305,10 +1310,11 @@ class WaveView(ttk.Frame):
                 tp, tn = (t if r["kind"] != "none" else np.nan for t, r in zip((tp, tn), d["ceil"]["refs"][c]))
                 fp, fn = ap, an
             else:
-                pk = _stair(*d["steps"][c], e)[0]
-                tp = tn = np.maximum(pk * h, floor)
-                ap = an = np.maximum(0.92 * pk, floor) if cfg["soft"] else np.nan
-                fp = fn = np.maximum(pk * (min(h, 0.92) if cfg["soft"] else h), floor)
+                pp, pn = (_peak(d["steps"][c], p, e, 0) for p in (0, 1))
+                tp, tn = np.maximum(pp * h, floor), np.maximum(pn * h, floor)
+                ap, an = (np.maximum(0.92 * pp, floor), np.maximum(0.92 * pn, floor)) if cfg["soft"] else (np.nan,) * 2
+                k = min(h, 0.92) if cfg["soft"] else h
+                fp, fn = np.maximum(pp * k, floor), np.maximum(pn * k, floor)
             fc = flagged[:, c] if exact else (mx[:, c] >= fp) | (mn[:, c] <= -fn)
             top = fill[sl] & above(tp, tn)
             yt, yb = s.y(mx[:, c], hl), s.y(mn[:, c], hl)
@@ -1413,10 +1419,10 @@ class WaveView(ttk.Frame):
             y0 = c * hl
             spec = []  # (levels +, levels -, colour, dash, width, tab, handle)
             if page and d["steps"] is not None:
-                pk = _stair(*d["steps"][c], e)[1]
-                spec.append((pk, pk, GUIDE, (1, 3), 1, "peak", None))
+                pp, pn = (_peak(d["steps"][c], p, e) for p in (0, 1))
+                spec.append((pp, pn, GUIDE, (1, 3), 1, "peak", None))
                 if self.app.applies("soft") and cfg["soft"]:
-                    spec.append((pk * 0.92, pk * 0.92, SOFT, (2, 2), 1, "92%", None))
+                    spec.append((pp * 0.92, pn * 0.92, SOFT, (2, 2), 1, "92%", None))
             for p, r in enumerate(d["ceil"]["refs"][c] if page and d["ceil"] is not None else ()):
                 if r["kind"] != "none":
                     v = np.full(len(e) - 1, r["theta"])

@@ -637,41 +637,40 @@ def uncompress_gain(y, sr, threshold, ratio, attack_ms, release_ms, makeup=0.0, 
     return -(gains + makeup)
 
 
-def peak_steps(a, sr, opt):
-    """Measured peak of a = |x| as a staircase: peaks(t) = values[k] for starts[k] <= t < starts[k+1].
-    diff_clips: one peak per section, split at gaps quieter than trans_amp for at least
-    trans_time; gap samples take the next section's peak, a trailing gap the last one's.
-    Otherwise one peak per peak_time block."""
+def peak_steps(y, sr, opt):
+    """Measured peaks of x as a staircase: values[k] = (top, bottom) for starts[k] <= t < starts[k+1],
+    each side's own peak (of x > 0 and of -x for x < 0), so asymmetric clipping is found on both.
+    diff_clips: one pair per section, split at gaps where |x| is quieter than trans_amp for at least
+    trans_time; gap samples take the next section's peaks, a trailing gap the last one's.
+    Otherwise one pair per peak_time block."""
+    a = np.abs(y)
     n = len(a)
     reset_amp = _db2lin(opt["reset_amp"])
     ignore = min(0.999, max(0.0, float(opt["peak_ignore"])))
 
-    def peak(seg):
-        return float(np.quantile(seg, 1.0 - ignore)) if seg.size > 1 else float(seg[0])
+    def peaks(seg):  # (top, bottom), never under reset_amp
+        return [max(float(np.quantile(v, 1.0 - ignore)) if v.size else 0.0, reset_amp)
+                for v in (seg[seg > 0], -seg[seg < 0])]
     if opt["diff_clips"]:
         trans_win = max(1, int(round(float(sr) * max(0.0, float(opt["trans_time"])))))
         sections = ~mask_min_run(a < _db2lin(opt["trans_amp"]), trans_win)
         d = np.diff(np.concatenate(([0], sections.astype(np.int8), [0])))
         cstarts, cends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
         if cstarts.size == 0:
-            return np.array([0]), np.array([reset_amp])
-        values = [max(peak(a[s:e]), reset_amp) for s, e in zip(cstarts, cends)]
-        return np.r_[0, cends[:-1]], np.array(values)
-    win = max(1, int(round(float(sr) * max(0.001, float(opt["peak_time"])))))
-    reset_win = max(1, int(round(float(sr) * max(0.001, float(opt["reset_time"])))))
-    starts = np.arange(0, n, win)
-    values = np.empty(len(starts))
-    for k, s in enumerate(starts):
-        aa = a[s:s + win]
-        pk = peak(aa)
-        if aa.max() < reset_amp and aa.size >= reset_win:
-            pk = reset_amp
-        values[k] = max(pk, reset_amp)
-    return starts, values
+            return np.array([0]), np.array([[reset_amp, reset_amp]])
+        return np.r_[0, cends[:-1]], np.array([peaks(y[s:e]) for s, e in zip(cstarts, cends)])
+    starts = np.arange(0, n, win := max(1, int(round(float(sr) * max(0.001, float(opt["peak_time"]))))))
+    return starts, np.array([peaks(y[s:s + win]) for s in starts]).reshape(-1, 2)
 
 
 def expand_steps(starts, values, n):
-    return np.repeat(values, np.diff(np.r_[starts, n]))
+    return np.repeat(values, np.diff(np.r_[starts, n]), axis=0)
+
+
+def side_peaks(y, steps):
+    """Per sample of x: the measured peak of its own side (top for x >= 0, bottom for x < 0)."""
+    p = expand_steps(*steps, len(y))
+    return np.where(y >= 0, p[:, 0], p[:, 1])
 
 
 def flag_mask(a, peaks, opt):
@@ -690,8 +689,7 @@ def flag_mask(a, peaks, opt):
 
 def _clip_mask(y0, sr, opt):
     """Which samples of one channel are clipped."""
-    a = np.abs(y0)
-    return flag_mask(a, expand_steps(*peak_steps(a, sr, opt), len(a)), opt)
+    return flag_mask(np.abs(y0), side_peaks(y0, peak_steps(y0, sr, opt)), opt)
 
 
 def _declip(y0, sr, opt, xp, dev, h, progress=None):

@@ -393,7 +393,8 @@ def test_cli_stereo_roundtrip():
     assert np.abs(out).max() > 1.1, np.abs(out).max()
 
 
-# The mask helpers before the peak_steps/flag_mask split, verbatim, as the reference.
+# The mask helpers before the peak_steps/flag_mask split, as the reference; since then each side (top,
+# bottom) has its own measured peak, so the peaks are taken of one side's samples (_side).
 def _old_mask_min_run(mask, min_run):
     if min_run <= 1:
         return mask
@@ -408,7 +409,12 @@ def _old_mask_min_run(mask, min_run):
     return keep
 
 
-def _old_per_clip_peaks(a, peaks, n, sr, trans_amp_db, trans_time, ignore, reset_amp):
+def _side(seg, ignore, p):
+    v = seg[seg > 0] if p == 0 else -seg[seg < 0]
+    return float(np.quantile(v, 1.0 - ignore)) if v.size else 0.0
+
+
+def _old_per_clip_peaks(a, peaks, n, sr, trans_amp_db, trans_time, ignore, reset_amp, y, p):
     trans_amp = U._db2lin(trans_amp_db)
     trans_win = max(1, int(round(float(sr) * max(0.0, float(trans_time)))))
     low = (a < trans_amp).astype(np.int8)
@@ -430,9 +436,7 @@ def _old_per_clip_peaks(a, peaks, n, sr, trans_amp_db, trans_time, ignore, reset
     seg_peak = np.empty(cstarts.size, dtype=np.float64)
     for k in range(cstarts.size):
         s, e = int(cstarts[k]), int(cends[k])
-        seg = a[s:e]
-        pk = float(np.quantile(seg, 1.0 - ignore)) if seg.size > 1 else float(seg[0])
-        seg_peak[k] = max(pk, reset_amp)
+        seg_peak[k] = max(_side(y[s:e], ignore, p), reset_amp)
         clip_of[s:e] = k
     valid_idx = np.flatnonzero(clip_of >= 0)
     valid_ids = clip_of[valid_idx]
@@ -443,7 +447,7 @@ def _old_per_clip_peaks(a, peaks, n, sr, trans_amp_db, trans_time, ignore, reset
 def _old_clip_mask(y0, sr, opt):
     n = len(y0)
     a = np.abs(y0)
-    peaks = np.empty(n, dtype=np.float64)
+    peaks2 = np.empty((2, n), dtype=np.float64)
 
     win = max(1, int(round(float(sr) * max(0.001, float(opt["peak_time"])))))
     reset_win = max(1, int(round(float(sr) * max(0.001, float(opt["reset_time"])))))
@@ -452,18 +456,18 @@ def _old_clip_mask(y0, sr, opt):
     low = float(opt["not_clip_below"]) / 100.0
     ignore = min(0.999, max(0.0, float(opt["peak_ignore"])))
 
-    if opt["diff_clips"]:
-        _old_per_clip_peaks(a, peaks, n, sr, float(opt["trans_amp"]), float(opt["trans_time"]),
-                            ignore, reset_amp)
-    else:
-        for s in range(0, n, win):
-            e = min(n, s + win)
-            aa = a[s:e]
-            pk = float(np.quantile(aa, 1.0 - ignore)) if aa.size > 1 else float(aa[0])
-            if aa.max() < reset_amp and (e - s) >= reset_win:
-                pk = reset_amp
-            pk = max(pk, reset_amp)
-            peaks[s:e] = pk
+    for p, peaks in enumerate(peaks2):
+        if opt["diff_clips"]:
+            _old_per_clip_peaks(a, peaks, n, sr, float(opt["trans_amp"]), float(opt["trans_time"]),
+                                ignore, reset_amp, y0, p)
+        else:
+            for s in range(0, n, win):
+                e = min(n, s + win)
+                pk = _side(y0[s:e], ignore, p)
+                if pk < reset_amp and (e - s) >= reset_win:
+                    pk = reset_amp
+                peaks[s:e] = max(pk, reset_amp)
+    peaks = np.where(y0 >= 0, peaks2[0], peaks2[1])
 
     high = float(opt["clip_above"]) / 100.0
     mask = a >= peaks * (high if opt["dynamic"] else min(low, high))
@@ -903,6 +907,21 @@ def _two_level(sr, secs=4):
     c = np.full(len(src), 0.95)
     c[len(src) // 3:2 * len(src) // 3] = 0.65
     return src, np.clip(src, -c[:, None], c[:, None])
+
+
+def test_manual_detection_asymmetric():
+    # clipped at +0.9 on top and -0.6 below: manual detection measures each side's own peak, so both
+    # sides are flagged and rebuilt (one peak of |x| would put the bottom under the threshold)
+    sr = 16000
+    src = _kick_stereo(sr)[:, 0]
+    cl = np.clip(src, -0.6, 0.9)
+    opt = U.settings_from_cfg(SPADE)
+    m = U._clip_mask(cl, sr, opt)
+    for side in (cl >= 0.9, cl <= -0.6):
+        assert side.any() and m[side].mean() > 0.95
+    out = U.process(cl, sr, dict(SPADE, gpu=False))
+    for sel, gain in ((src > 0.9, 1.0), (src < -0.6, 5.0)):
+        assert snr(src[sel], out[sel]) > snr(src[sel], cl[sel]) + gain
 
 
 def test_sections():

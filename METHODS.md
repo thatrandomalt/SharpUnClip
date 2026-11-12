@@ -174,9 +174,11 @@ step s = 1 every r = 1 iteration, ε = 0.1, and Hann-weighted overlap-add.
 
 1. **Clip detection relative to the measured peak.** SPADE assumes the
    clipping threshold θ is known. Here the peak is measured from the signal:
-   the (1 − *peak ignore*) quantile of |x| per *peak time* block, or per section
-   between silent gaps with *Different-clips detection*. A sample counts as
-   clipped when |x| ≥ peak × *Clip above* %. Further options:
+   the (1 − *peak ignore*) quantile per *peak time* block, or per section
+   between silent gaps with *Different-clips detection*, separately for the top
+   (x > 0) and the bottom (−x for x < 0), so asymmetric clipping (say +0.9 and
+   −0.6) is found on both sides. A sample counts as clipped when |x| ≥ its
+   side's peak × *Clip above* %. Further options:
    - *Dynamic threshold* off: also flags the band down to *Not-clip below* %.
    - *Not-clip level*: samples below this level are never flagged.
    - *Remove glitches*: drops single-sample runs.
@@ -423,6 +425,7 @@ integrated GPU).
 | `test_torch_gpu_pick` | With CUDA absent, an Intel (XPU) or Apple (MPS) GPU is picked for both engines (simulated). |
 | `test_nmf_multi_device` | `--gpus`: the NMF engine's chunks shared between devices (one device twice, on the CPU and the GPU) give exactly the one-device result; the CLI logs it. |
 | `test_spade_multi_device` | `--gpus`: SPADE's batches shared between devices (one device twice) give exactly the one-device result, with progress in order; on every backend. |
+| `test_manual_detection_asymmetric` | Clipped at +0.9 and −0.6: manual detection flags both sides (each against its own peak) and rebuilds them. |
 | `test_sections` | A part clipped 3.3 dB lower than the rest is missed song-wide and restored as a section (SPADE and NMF), also at another process rate; everything outside the section is bit-identical; section settings inherit the song's. |
 | `test_suggest_sections` | The part with another ceiling is suggested at its own level and span; unclipped audio gets none. |
 | `test_gpu_choice` | One GPU for every engine by name: PyTorch's index (simulated: two identical cards, "#2"), and each real OpenCL GPU by its listed name. |

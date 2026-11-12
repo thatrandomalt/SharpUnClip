@@ -66,71 +66,82 @@ There is nothing to compile. SharpUnClip is plain Python. The SPADE engine's
 GPU kernel is compiled automatically by your graphics driver on its first GPU
 run (a few seconds); pyopencl caches it, so later runs start immediately.
 
-### 1. Get the code and make a virtual environment
+### 1. Install uv and get the code
 
-Use **Python 3.12** (3.10 is the minimum). AMD's PyTorch builds for Windows
-are 3.12 only, and on some AMD setups tkinter would not import on newer
-versions. Get it from <https://www.python.org/downloads/>: on macOS that build
-includes Tk, and the `python3` macOS ships is 3.9, which is too old.
+SharpUnClip is set up with [uv](https://docs.astral.sh/uv/), which installs
+the right Python (3.12, from `.python-version`) and every dependency into a
+`.venv` folder inside the project, without touching the rest of your system.
+Install uv once:
+- **Windows (PowerShell):**
+  `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+- **Linux / macOS:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+Then get the code:
 
 ```
 git clone <this repository's URL>
 cd SharpUnClip
-python3.12 -m venv .venv
 ```
-
-(On Windows: `py -3.12 -m venv .venv`.)
-
-Activate the environment:
-- **Windows:** `.venv\Scripts\activate`
-- **Linux / macOS:** `source .venv/bin/activate`
 
 ### 2. Install the dependencies
 
-```
-pip install numpy scipy soundfile torch   # required (torch: NMF engine, Unlimit)
-pip install pyopencl                                 # optional: SPADE engine on any GPU vendor
-```
-
-**PyTorch:** a plain `pip install torch` gives a CPU-only build on Windows.
-For the NMF engine on an NVIDIA GPU, install the CUDA build with the command
-for your system from <https://pytorch.org/get-started/locally/>, for example:
+One command, with the PyTorch build for your GPU (PyTorch runs the NMF engine
+and Unlimit):
 
 ```
-pip install torch --index-url https://download.pytorch.org/whl/cu128
+uv sync --extra cu128 --extra opencl --extra playback
 ```
 
-**Other GPUs** need their own PyTorch build for the NMF engine (and
-Unlimit). Tested: CUDA (RTX 4070, V100), ROCm (RX 9070 and Radeon 8060S,
-Linux) and Apple silicon (M4 Pro, MPS). Intel runs the same PyTorch code but is untested, so if
-it fails, switch *GPU* off (or drop `--gpu`) to use the CPU, and please report
-it.
-- **AMD:** a ROCm build of PyTorch, which shows the GPU to PyTorch as a CUDA
-  device. Linux: the ROCm option on <https://pytorch.org/get-started/locally/>.
-  Windows 11: AMD's PyTorch for Windows, for Radeon RX 7000/9000 and Ryzen AI
-  300 / AI Max (Python 3.12); follow
-  [AMD's guide](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html).
-  Older Radeons and most integrated ones aren't supported by ROCm. Don't run
-  a plain `pip install torch` (or `-r requirements.txt`) afterwards: it can
-  swap in PyPI's torch. Check with the command in step 4: it should say
-  `NMF on ROCm: <your GPU>`. With a ROCm build, the
-  SPADE engine runs through PyTorch too, not OpenCL: Mesa's OpenCL loaded into
-  the same program hid the GPU from PyTorch (`--gpu opencl` still forces it).
-  Tested: PyTorch 2.13 with ROCm 7.1 on CachyOS; 2.14.1 with ROCm 7.14 would
-  not load next to Mesa's OpenCL there.
-- **Intel Arc and Core Ultra (Windows, Linux):** with a current Intel driver,
-  `pip install torch --index-url https://download.pytorch.org/whl/xpu`
-- **Apple silicon:** a plain `pip install torch` includes the MPS
-  backend. Operations MPS lacks run on the CPU automatically.
+Pick exactly one PyTorch extra:
+
+| Extra | For |
+|---|---|
+| `cu128` | NVIDIA, Volta (V100) and GTX 16 up to RTX 50 (CUDA 12.8). Older cards: `cpu` plus `opencl` |
+| `rocm` | AMD on Linux (ROCm 7.1) |
+| `xpu` | Intel Arc and Core Ultra (Windows, Linux), with a current Intel driver |
+| `cpu` | No supported GPU. On Apple silicon this is the build with the MPS backend, so Macs use `cpu` too |
+
+And the optional ones:
+- `opencl`: the SPADE engine on any GPU vendor (pyopencl).
+- `playback`: listening in the GUI (sounddevice; on Linux it needs
+  `libportaudio2` too).
+
+The first `uv sync` downloads PyTorch (up to a few GB). Run it again with
+the same extras after pulling an update. A `uv sync` without the PyTorch
+extra removes PyTorch again; `uv run` (below) never changes what is
+installed apart from adding missing packages.
+
+Tested: CUDA (RTX 4070, V100), ROCm (RX 9070 and Radeon 8060S, Linux) and
+Apple silicon (M4 Pro, MPS). Intel runs the same PyTorch code but is
+untested, so if it fails, switch *GPU* off (or drop `--gpu`) to use the CPU,
+and please report it.
+- **AMD on Windows 11:** AMD's PyTorch for Windows, for Radeon RX 7000/9000
+  and Ryzen AI 300 / AI Max (Python 3.12). Run
+  `uv sync --extra opencl --extra playback`, then install AMD's PyTorch into
+  the project's environment with the `pip install` commands from
+  [AMD's guide](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html),
+  written as `uv pip install ...`. From then on use `uv sync --inexact` so it
+  keeps AMD's PyTorch, and never add a PyTorch extra. Older Radeons and most
+  integrated ones aren't supported by ROCm.
+- **AMD (ROCm) notes:** check with the command in step 4: it should say
+  `NMF on ROCm: <your GPU>`. With a ROCm build, the SPADE engine runs through
+  PyTorch too, not OpenCL: Mesa's OpenCL loaded into the same program hid the
+  GPU from PyTorch (`--gpu opencl` still forces it). Tested: PyTorch 2.13 with
+  ROCm 7.1 on CachyOS; 2.14.1 with ROCm 7.14 would not load next to Mesa's
+  OpenCL there.
 
 GPUs none of these cover can still run the **Accurate SPADE** and **Unmaster
 SPADE** presets through OpenCL; they are less accurate (see
 [Results](#results)).
 
-**GUI (Tkinter)** ships with Python on Windows and macOS. On Linux, install it
-from your package manager, e.g. `sudo apt install python3-tk`. To listen to
-the region in the GUI, also `pip install sounddevice` (optional; on Linux it
-needs `libportaudio2` too).
+**GUI (Tkinter)** comes with Python. If the GUI fails with a tkinter error on
+Linux, install your distribution's Tk (e.g. `sudo apt install python3-tk`).
+
+**Without uv:** a Python 3.10+ virtual environment and
+`pip install numpy scipy soundfile torch` (plus `pyopencl`, `sounddevice`)
+work too; take the `torch` command for your GPU from
+<https://pytorch.org/get-started/locally/>. Then use `python` where this
+README says `uv run`.
 
 ### 3. GPU drivers (optional)
 
@@ -149,8 +160,8 @@ is enough; no CUDA or ROCm install is needed.
 ### 4. Check it works
 
 ```
-python test_sharpunclip.py
-python -c "import sharpunclip as s; print(s.backend_name(*s.spade_backend(True), s.DEFAULTS))"
+uv run test_sharpunclip.py
+uv run python -c "import sharpunclip as s; print(s.backend_name(*s.spade_backend(True), s.DEFAULTS))"
 ```
 
 The test suite runs on every backend it finds. The second command prints the
@@ -164,7 +175,7 @@ NVIDIA GeForce RTX 4070 Laptop GPU`, or `NMF on CPU`.
 - **Choosing a GPU:** by default the SPADE engine takes the GPU with the most
   compute units and PyTorch its first. With several GPUs, pick one for every
   engine: the list next to *GPU* in the GUI, or `--gpu-name` with part of its
-  name (`python sharpunclip.py --list-gpus` lists them; identical cards show
+  name (`uv run sharpunclip.py --list-gpus` lists them; identical cards show
   as `NAME #2`, ...). A GPU PyTorch can't use (e.g. an AMD one with a CUDA
   build of PyTorch) runs the SPADE engine, and the NMF engine on the CPU. The
   environment variable `SHARPUNCLIP_OPENCL_DEVICE` does the same.
@@ -176,16 +187,14 @@ NVIDIA GeForce RTX 4070 Laptop GPU`, or `NMF on CPU`.
   short song gains little), the SPADE engine its frame batches between the
   OpenCL GPUs (without `--gpu-name`, only those with at least a quarter of the
   strongest one's compute units, so an integrated GPU does not slow it down).
-  Unlimit uses one GPU. `python benchmark.py --gpu --gpus all` measures it.
-- **uv users:** `uv venv` and `uv pip install ...` work the same way, or
-  prefix the commands with `uv run`.
+  Unlimit uses one GPU. `uv run benchmark.py --gpu --gpus all` measures it.
 
 ## Use
 
 ### GUI
 
 ```
-python gui.py
+uv run gui.py
 ```
 
 1. Open a song: **Browse** next to *Input*, or Ctrl+O. The output name
@@ -290,7 +299,8 @@ The preview's state, at the right of the audition bar:
 
 #### Listening
 
-Playback needs `pip install sounddevice` (on Linux also `libportaudio2`).
+Playback needs the `playback` extra (`uv sync ... --extra playback`; on Linux
+also `libportaudio2`).
 Without it the audition controls are greyed out with a note, and everything
 else works. Nothing plays until you press Play.
 
@@ -455,10 +465,10 @@ are not typing in a field.
 ### Command line
 
 ```
-python sharpunclip.py song.flac -o song_unclipped.wav --gpu
-python sharpunclip.py master.flac -o unmastered.wav --gpu --preset Unmaster
-python sharpunclip.py song.flac --preset my_settings.json --max-restore 3
-python sharpunclip.py comp.wav --no-declip --uncompress 50 \
+uv run sharpunclip.py song.flac -o song_unclipped.wav --gpu
+uv run sharpunclip.py master.flac -o unmastered.wav --gpu --preset Unmaster
+uv run sharpunclip.py song.flac --preset my_settings.json --max-restore 3
+uv run sharpunclip.py comp.wav --no-declip --uncompress 50 \
   --comp-threshold -6 --comp-ratio 2 --comp-attack 20 --comp-release 200
 ```
 
@@ -471,7 +481,7 @@ python sharpunclip.py comp.wav --no-declip --uncompress 50 \
   when the run fails.
 - **Files:** any input libsndfile reads (wav, flac, ogg, aiff, …). Output is
   always 32-bit float WAV, because restored peaks go above full scale.
-- `python sharpunclip.py --help` lists every flag.
+- `uv run sharpunclip.py --help` lists every flag.
 
 **Speed** (5½-minute song, on AC power; a laptop in power-saving mode can be
 2× slower):
@@ -651,16 +661,16 @@ Levels and Limiter are also on the Output page of the main window.
 ## Testing
 
 ```
-python test_sharpunclip.py   # engine + CLI tests, on every backend found (CPU, PyTorch's GPU, each OpenCL GPU)
-python gui.py --selfcheck    # every preset through the real GUI fields, plus the GUI's displays, previews and playback (offline, silent)
-python abtest.py --selftest  # the scoring code
+uv run test_sharpunclip.py   # engine + CLI tests, on every backend found (CPU, PyTorch's GPU, each OpenCL GPU)
+uv run gui.py --selfcheck    # every preset through the real GUI fields, plus the GUI's displays, previews and playback (offline, silent)
+uv run abtest.py --selftest  # the scoring code
 ```
 
 ### Benchmark
 
 ```
-python benchmark.py          # every algorithm on the CPU and the GPU: time and accuracy
-python benchmark.py --quick  # one run per algorithm family, on 8 s
+uv run benchmark.py          # every algorithm on the CPU and the GPU: time and accuracy
+uv run benchmark.py --quick  # one run per algorithm family, on 8 s
 ```
 
 It runs on `bench/song.flac`, a 16-second song synthesized for it (so its true
@@ -676,7 +686,7 @@ To measure quality on your own material, render the same project twice, once
 clean and once with clipping/limiting/compression, then:
 
 ```
-python abtest.py --orig clean.wav --degraded clipped.wav --args "--preset Accurate --gpu"
+uv run abtest.py --orig clean.wav --degraded clipped.wav --args "--preset Accurate --gpu"
 ```
 
 It checks the renders line up, then reports SNR, SI-SDR, stereo-side accuracy
@@ -698,6 +708,7 @@ unreleased music, and too large for GitHub.
 | `abtest.py` | Scoring against a known original |
 | `benchmark.py`, `bench/` | Speed and accuracy benchmark, its test song and reference scores |
 | `test_sharpunclip.py` | Automated tests |
+| `pyproject.toml`, `uv.lock`, `.python-version` | Dependencies for uv: the PyTorch build per GPU, the tested versions, Python 3.12 |
 | `weights/` | Pretrained De-limiter weights |
 | `docs/` | README screenshot |
 | `LICENSE`, `LICENSES/` | MIT license (SPDX/REUSE layout) |

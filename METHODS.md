@@ -413,7 +413,7 @@ same checks are built into `abtest.py`.
 
 ### 5.5 Automated tests
 
-`python test_sharpunclip.py` runs every engine test on every backend present
+`uv run test_sharpunclip.py` runs every engine test on every backend present
 (the SPADE tests use the Accurate SPADE settings):
 CPU, PyTorch's GPU (CUDA, XPU or MPS) if present, and OpenCL once per GPU (on
 the development machine: an NVIDIA RTX 4070 laptop GPU and an AMD Radeon
@@ -450,15 +450,15 @@ integrated GPU).
 | `test_nmf_preview_close` | A render reusing the GUI's NMF analysis equals the CLI's; an NMF region preview is within 30 dB SNR of the render. |
 | `test_cli_*` | End to end: presets, `.json` presets, logging (also of a failed run, with its traceback), stereo float output, uncompress flags. |
 
-`python benchmark.py` times every preset's algorithms on the CPU and the GPU on
+`uv run benchmark.py` times every preset's algorithms on the CPU and the GPU on
 a committed, synthesized 16 s song (`bench/song.flac`) with known original,
 and compares their scores with `bench/reference.json` (see the README).
 
-`python gui.py --selfcheck` drives the real window's input fields with every
+`uv run gui.py --selfcheck` drives the real window's input fields with every
 preset and checks they reach the engine unchanged. It also checks the GUI's
 detection display against the engine's masks, that its region previews and
 renders equal `process()`, and its playback buffers (offline: no sound is
-played). `python abtest.py
+played). `uv run abtest.py
 --selftest` checks the scoring code.
 
 **Development environment:** Windows 11, Python 3.14, NumPy, SciPy 1.18,

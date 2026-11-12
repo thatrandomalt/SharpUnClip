@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2026 thatrandomalt
+#
+# SPDX-License-Identifier: MIT
+
+[project]
+name = "sharpunclip"
+version = "0.1.0"
+description = "Declipper, unlimiter and uncompressor for clipped and mastered audio"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "soundfile"]
+
+[project.optional-dependencies]
+# PyTorch (NMF engine, Unlimit): pick the build for your GPU, exactly one of these
+cpu = ["torch"]    # CPU only; on macOS PyPI's build, which includes Apple silicon's MPS
+cu128 = ["torch"]  # NVIDIA (CUDA 12.8)
+xpu = ["torch", "triton-xpu; sys_platform != 'darwin'"]  # Intel Arc and Core Ultra
+rocm = ["torch", "triton-rocm; sys_platform == 'linux'"]  # AMD on Linux (ROCm)
+opencl = ["pyopencl"]      # SPADE engine on any GPU vendor
+playback = ["sounddevice"] # listening in the GUI (Linux also needs libportaudio2)
+
+[tool.uv]
+# where PyTorch has current builds: 64-bit Windows and Linux, Apple silicon
+environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+conflicts = [[{ extra = "cpu" }, { extra = "cu128" }, { extra = "xpu" }, { extra = "rocm" }]]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-xpu", extra = "xpu", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
+triton-xpu = [{ index = "pytorch-xpu", extra = "xpu" }]
+triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.1"
+explicit = true
